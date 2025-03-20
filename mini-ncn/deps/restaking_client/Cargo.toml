@@ -1,0 +1,20 @@
+[package]
+name = "jito-restaking-client"
+description = "Jito restaking program client"
+edition = "2021"
+
+[features]
+serde = []
+anchor = []
+anchor-idl-build = []
+fetch = []
+
+[dependencies]
+anchor-lang = { workspace = true }
+borsh = { workspace = true }
+num-derive = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+serde_with = { workspace = true }
+solana-program = { workspace = true }
+thiserror = { workspace = true }
