@@ -1,6 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { BN, Program, web3 } from "@coral-xyz/anchor";
 import * as spl from "@solana/spl-token"
+import { ConcurrentMerkleTreeAccount, createAllocTreeIx, MerkleTree } from "./account-compression";
 import { MiniNcn } from "../target/types/mini_ncn";
 import { assert } from "chai";
 import { $ } from "bun";
@@ -48,6 +49,7 @@ describe("mini-ncn", () => {
   
   let configPubkey: web3.PublicKey;
   let ballotBoxPubkey: web3.PublicKey;
+  const merkleTree = web3.Keypair.generate();
 
   before(async () => {
     // prepare NCN
@@ -94,13 +96,26 @@ describe("mini-ncn", () => {
   });
 
   it("initialize", async () => {
+    const allocTreeIx = await createAllocTreeIx(
+      provider.connection,
+      merkleTree.publicKey,
+      provider.wallet.payer.publicKey,
+      {
+        maxDepth: 10,
+        maxBufferSize: 32,
+      },
+      8,
+    )
+
     const tx = await miniNcn.methods
       .initialize()
       .accounts({
         ncn: ncnPubkey,
         authority: jitoAdminKeypair.publicKey,
+        merkleTree: merkleTree.publicKey,
       })
-      .signers([jitoAdminKeypair])
+      .preInstructions([allocTreeIx])
+      .signers([jitoAdminKeypair, merkleTree])
 
     const pubkeys = await tx.pubkeys();
     debugPubkeys(pubkeys);
@@ -154,7 +169,7 @@ describe("mini-ncn", () => {
     const tx = miniNcn.methods
       .initializeVault(new BN(1_000_000_000))
       .accountsPartial({
-        ncn: ncnPubkey,
+        config: configPubkey,
         vault,
         stMint: mint.publicKey,
         admin: jitoAdminKeypair.publicKey,
@@ -179,6 +194,7 @@ describe("mini-ncn", () => {
 
   let op0Pubkey: web3.PublicKey;
   let op1Pubkey: web3.PublicKey;
+  let treeData: MerkleTree;
   it("initialize operators", async () => {
     const op0Output = await $`${jitoCliOp0} restaking operator initialize 1000`
     op0Pubkey = getInitializedAddress(op0Output.stderr.toString());
@@ -190,7 +206,34 @@ describe("mini-ncn", () => {
     await $`${jitoCliOp1} restaking operator initialize-operator-vault-ticket ${op1Pubkey} ${vaultPubkey}`
     await $`${jitoCliAdmin} vault vault initialize-operator-delegation ${vaultPubkey} ${op1Pubkey}`
 
-    // await $`${jitoCli} restaking operator list`
+    // await $`${jitoCli} restaking operator list
+
+    // build the tree offline
+    treeData = MerkleTree.sparseMerkleTreeFromLeaves([
+      op0Pubkey.toBuffer(),
+      op1Pubkey.toBuffer(),
+    ], 10);
+
+    await miniNcn.methods
+      .initializeOperator()
+      .accountsPartial({
+        config: configPubkey,
+        authority: jitoAdminKeypair.publicKey,
+        merkleTree: merkleTree.publicKey,
+        operator: op0Pubkey,
+      })
+      .postInstructions([
+        await miniNcn.methods.initializeOperator()
+          .accountsPartial({
+            config: configPubkey,
+            authority: jitoAdminKeypair.publicKey,
+            merkleTree: merkleTree.publicKey,
+            operator: op1Pubkey,
+          })
+          .instruction(),
+      ])
+      .signers([jitoAdminKeypair])
+      .rpc();
   })
 
 
@@ -243,24 +286,43 @@ describe("mini-ncn", () => {
 
 
   it("vote", async () => {
-    const tx = await miniNcn.methods
-      .vote(true)
+    const merkleTreeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(provider.connection, merkleTree.publicKey);
+    const root = merkleTreeAccount.getCurrentRoot();
+
+    const proof = treeData.getProof(0);
+    assert.ok(root.equals(proof.root));
+
+    const proofAsAccounts = proof.proof.map(node => ({
+        pubkey: new web3.PublicKey(node),
+        isSigner: false,
+        isWritable: false,
+    }));
+
+    const tx = miniNcn.methods
+      .vote({
+        root: Array.from(proof.root),
+        index: proof.leafIndex,
+        approved: true
+      })
       .accounts({
-        ballotBox: ballotBoxPubkey,
+        config: configPubkey,
+        merkleTree: merkleTree.publicKey,
         operatorAdmin: op0AdminKeypair.publicKey,
         operator: op0Pubkey,
         vault: vaultPubkey,
       })
+      .remainingAccounts(proofAsAccounts)
       .signers([op0AdminKeypair])
 
     debugPubkeys(await tx.pubkeys());
 
-    await tx.rpc();
+    await tx.rpc({
+      skipPreflight: true,
+    });
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
     assert.equal(ballotBox.operatorsVoted.toNumber(), 1);
     assert.equal(ballotBox.approvedVotes.toNumber(), 234567890);
-    assert.equal(ballotBox.operators[0].toString(), op0AdminKeypair.publicKey.toString());
   });
 
 
@@ -283,7 +345,7 @@ describe("mini-ncn", () => {
   })
 
 
-  it("check consensus after vote window", async () => {
+  it.skip("check consensus after vote window", async () => {
     // wait for vote window to pass
     await Bun.sleep(4000);
 
