@@ -6,8 +6,12 @@ use jito_vault_client::programs::JITO_VAULT_ID;
 
 declare_id!("FMtP7JSgYneYu36nisXubFWTWw6LGC9EFJ6YhjAq6CQr");
 
+declare_program!(spl_account_compression);
+
+const NOOP_PROGRAM: Pubkey = pubkey!("noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV");
+
 const MAX_OPERATORS: u64 = 3;
-const VOTE_WINDOW: u64 = 10;
+
 
 #[program]
 pub mod mini_ncn {
@@ -21,8 +25,25 @@ pub mod mini_ncn {
         config.ncn = ctx.accounts.ncn.key();
         config.authority = ctx.accounts.authority.key();
 
+        spl_account_compression::cpi::init_empty_merkle_tree(
+            CpiContext::new_with_signer(
+                ctx.accounts.compression_program.to_account_info(),
+                spl_account_compression::cpi::accounts::InitEmptyMerkleTree {
+                    authority: ctx.accounts.ballot_box.to_account_info(),
+                    merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
+                    noop: ctx.accounts.noop_program.to_account_info(),
+                },
+                &[
+                    &[b"ballot_box", config.key().as_ref(), &[ctx.bumps.ballot_box]],
+                ],
+            ),
+            10,
+            32,
+        )?;
+
         let ballot_box = &mut ctx.accounts.ballot_box;
         ballot_box.config = config.key();
+        ballot_box.merkle_tree = ctx.accounts.merkle_tree.key();
 
         Ok(())
     }
@@ -53,9 +74,35 @@ pub mod mini_ncn {
                 initialize_token_amount,
             },
         ).invoke_signed(&[
-            &[b"mini_ncn", ctx.accounts.ncn.key().as_ref(), &[ctx.bumps.config]],
+            &[b"mini_ncn", ctx.accounts.config.ncn.as_ref(), &[ctx.bumps.config]],
             &[b"vrt_mint", ctx.accounts.st_mint.key().as_ref(), &[ctx.bumps.vrt_mint]],
         ])?;
+
+        Ok(())
+    }
+
+    pub fn initialize_operator(ctx: Context<InitializeOperator>) -> Result<()> {
+        // TODO: link NCN stuff
+
+        // SKIP: noop log for now
+        // wrap_application_data_v1(...)?;
+
+        let leaf = ctx.accounts.operator.key().to_bytes();
+
+        spl_account_compression::cpi::append(
+            CpiContext::new_with_signer(
+                ctx.accounts.compression_program.to_account_info(),
+                spl_account_compression::cpi::accounts::Append {
+                    authority: ctx.accounts.ballot_box.to_account_info(),
+                    merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
+                    noop: ctx.accounts.noop_program.to_account_info(),
+                },
+                &[
+                    &[b"ballot_box", ctx.accounts.config.key().as_ref(), &[ctx.bumps.ballot_box]],
+                ],
+            ),
+            leaf,
+        )?;
 
         Ok(())
     }
@@ -67,18 +114,19 @@ pub mod mini_ncn {
         require!(ballot_box.state.is_none(), MiniNcnError::NonEmptyState);
 
         // TODO: maybe set consensus threshold here
-        ballot_box.reset(clock.slot, state);
+        ballot_box.reset(clock.epoch, state);
 
         Ok(())
     }
 
-    pub fn vote(ctx: Context<Vote>, approved: bool) -> Result<()> {
+    // explicitly lifetime is required for remaining_accounts
+    pub fn vote<'info>(ctx: Context<'_, '_, '_, 'info, Vote<'info>>, args: VoteArgs) -> Result<()> {
         let ballot_box = &mut ctx.accounts.ballot_box;
 
         let clock = Clock::get()?;
         require!(
-            clock.slot <= ballot_box.slot + VOTE_WINDOW,
-            MiniNcnError::InvalidSlot
+            clock.epoch == ballot_box.epoch,
+            MiniNcnError::InvalidEpoch
         );
 
         let operator_index = ballot_box.operators_voted;
@@ -88,6 +136,23 @@ pub mod mini_ncn {
         );
 
         // TODO: ncn operator ticket stuff
+
+        // verify merkle tree proof
+        // TODO: hash node
+        let leaf = ctx.accounts.operator.key().to_bytes();
+
+        spl_account_compression::cpi::verify_leaf(
+            CpiContext::new_with_signer(
+                ctx.accounts.compression_program.to_account_info(),
+                spl_account_compression::cpi::accounts::VerifyLeaf { merkle_tree: ctx.accounts.merkle_tree.to_account_info() },
+                &[
+                    &[b"ballot_box", ctx.accounts.config.key().as_ref(), &[ctx.bumps.ballot_box]],
+                ],
+            ).with_remaining_accounts(ctx.remaining_accounts.to_vec()),
+            args.root,
+            leaf,
+            args.index
+        )?;
 
         // Vault-Operator
         {
@@ -109,10 +174,8 @@ pub mod mini_ncn {
         require!(vault_operator_delegation.operator == ctx.accounts.operator.key(), MiniNcnError::InvalidOperator);
         require!(vault_operator_delegation.vault == ctx.accounts.vault.key(), MiniNcnError::InvalidVault);
 
-        // skip check duplicated voter for demo
-        ballot_box.operators[operator_index as usize] = ctx.accounts.operator_admin.key();
         ballot_box.operators_voted += 1;
-        if approved {
+        if args.approved {
             ballot_box.approved_votes += vault_operator_delegation.delegation_state.staked_amount;
             msg!(
                 "{} Approved at epoch {}",
@@ -132,16 +195,12 @@ pub mod mini_ncn {
         let vault = Vault::from_bytes(&ctx.accounts.vault.try_borrow_data()?)?;
 
         let clock = Clock::get()?;
-        let vote_window_passed = clock.slot > ballot_box.slot + VOTE_WINDOW;
+        let vote_window_passed = clock.epoch > ballot_box.epoch;
         let mut consensus_reached = false;
 
         // TODO: 
         if ballot_box.approved_votes > vault.vrt_supply / 2 {
             consensus_reached = true;
-        } else {
-            if vote_window_passed && ballot_box.approved_votes > vault.vrt_supply / 2 {
-                consensus_reached = true;
-            }
         }
 
         if consensus_reached {
@@ -171,19 +230,26 @@ pub struct Initialize<'info> {
     )]
     pub ballot_box: Account<'info, BallotBox>,
     /// CHECK:
+    #[account(mut)]
+    pub merkle_tree: UncheckedAccount<'info>,
+    /// CHECK:
     pub ncn: UncheckedAccount<'info>,
     #[account(mut)]
     pub authority: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
+    pub compression_program: Program<'info, spl_account_compression::program::SplAccountCompression>,
+    /// CHECK:
+    #[account(address = NOOP_PROGRAM)]
+    pub noop_program: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
-    /// CHECK:
-    pub ncn: UncheckedAccount<'info>,
-    #[account(seeds = [b"mini_ncn", ncn.key().as_ref()], bump)]
+    // /// CHECK:
+    // pub ncn: UncheckedAccount<'info>,
+    #[account(seeds = [b"mini_ncn", config.ncn.key().as_ref()], bump)]
     pub config: Account<'info, Config>,
     /// CHECK:
     #[account(address = JITO_VAULT_ID)]
@@ -193,7 +259,7 @@ pub struct InitializeVault<'info> {
     pub jito_vault_config: UncheckedAccount<'info>,
     /// CHECK:
     #[account(mut, seeds = [b"vault", config.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
-    pub vault: UncheckedAccount<'info>,
+    pub vault: SystemAccount<'info>,
     #[account()]
     pub st_mint: Account<'info, anchor_spl::token::Mint>,
     #[account(mut, associated_token::mint = st_mint, associated_token::authority = admin)]
@@ -217,6 +283,26 @@ pub struct InitializeVault<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitializeOperator<'info> {
+    #[account(mut, has_one = authority @ MiniNcnError::ConfigMismatch)]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [b"ballot_box", config.key().as_ref()], bump)]
+    pub ballot_box: Account<'info, BallotBox>,
+    /// CHECK:
+    #[account(mut, address = ballot_box.merkle_tree)]
+    pub merkle_tree: UncheckedAccount<'info>,
+    /// CHECK:
+    pub operator: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub compression_program: Program<'info, spl_account_compression::program::SplAccountCompression>,
+    /// CHECK:
+    #[account(address = NOOP_PROGRAM)]
+    pub noop_program: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct Propose<'info> {
     #[account(mut, has_one = config @ MiniNcnError::ConfigMismatch)]
     pub ballot_box: Account<'info, BallotBox>,
@@ -227,10 +313,21 @@ pub struct Propose<'info> {
     pub payer: Signer<'info>,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct VoteArgs {
+    pub root: [u8; 32],
+    pub index: u32,
+    pub approved: bool,
+}
+
 #[derive(Accounts)]
 pub struct Vote<'info> {
-    #[account(mut)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds = [b"ballot_box", config.key().as_ref()], bump)]
     pub ballot_box: Account<'info, BallotBox>,
+    /// CHECK:
+    #[account(mut, address = ballot_box.merkle_tree)]
+    pub merkle_tree: UncheckedAccount<'info>,
     pub operator_admin: Signer<'info>,
     /// CHECK:
     #[account()]
@@ -244,6 +341,10 @@ pub struct Vote<'info> {
     /// CHECK:
     #[account(seeds = [b"vault_operator_delegation", vault.key().as_ref(), operator.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
     pub vault_operator_delegation: UncheckedAccount<'info>,
+    pub compression_program: Program<'info, spl_account_compression::program::SplAccountCompression>,
+    /// CHECK:
+    #[account(address = NOOP_PROGRAM)]
+    pub noop_program: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -270,20 +371,18 @@ pub struct Config {
 #[derive(InitSpace)]
 pub struct BallotBox {
     pub config: Pubkey,
-    // TODO: use epoch in real program
-    pub slot: u64,
+    pub epoch: u64,
     pub operators_voted: u64,
     pub approved_votes: u64,
-    pub operators: [Pubkey; MAX_OPERATORS as usize],
+    pub merkle_tree: Pubkey,
     pub state: Option<[u8; 32]>,
 }
 
 impl BallotBox {
-    pub fn reset(&mut self, slot: u64, state: [u8; 32]) {
-        self.slot = slot;
+    pub fn reset(&mut self, epoch: u64, state: [u8; 32]) {
+        self.epoch = epoch;
         self.operators_voted = 0;
         self.approved_votes = 0;
-        self.operators = [Pubkey::default(), Pubkey::default(), Pubkey::default()];
         self.state = Some(state);
     }
 }
@@ -302,8 +401,8 @@ pub enum MiniNcnError {
     InvalidOperatorVaultTicket,
     #[msg("Invalid vault operator delegation")]
     InvalidVaultOperatorDelegation,
-    #[msg("Invalid slot")]
-    InvalidSlot,
+    #[msg("Invalid epoch")]
+    InvalidEpoch,
     #[msg("Non-empty state")]
     NonEmptyState,
     #[msg("No state")]

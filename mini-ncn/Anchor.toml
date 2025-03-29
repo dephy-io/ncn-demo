@@ -15,7 +15,7 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "bun run -b ts-mocha ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "bun run -b ts-mocha ./tsconfig.json -t 1000000 tests/*.ts"
 
 [test]
 startup_wait = 3000
@@ -29,3 +29,11 @@ program = "../fixtures/jito_restaking_program.so"
 [[test.genesis]]
 address = "Vau1t6sLNxnzB7ZDsef8TLbPLfyZMYXH8WTNqUdm9g8"
 program = "../fixtures/jito_vault_program.so"
+
+[[test.genesis]]
+address = "noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV"
+program = "../fixtures/noop.so"
+
+[[test.genesis]]
+address = "cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK"
+program = "../fixtures/spl_account_compression.so"
