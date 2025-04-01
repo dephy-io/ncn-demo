@@ -1,6 +1,6 @@
 #![allow(unexpected_cfgs)]
 
-use anchor_lang::prelude::*;
+use anchor_lang::{prelude::*, solana_program};
 use jito_restaking_client::programs::JITO_RESTAKING_ID;
 use jito_vault_client::programs::JITO_VAULT_ID;
 
@@ -11,6 +11,22 @@ declare_program!(spl_account_compression);
 const NOOP_PROGRAM: Pubkey = pubkey!("noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV");
 
 const MAX_OPERATORS: u64 = 3;
+
+// from spl-merkle-tree-reference
+type Node = [u8; 32];
+
+pub fn recompute(mut leaf: Node, proof: &[Node], index: u32) -> Node {
+    for (i, s) in proof.iter().enumerate() {
+        if index >> i & 1 == 0 {
+            let res = solana_program::keccak::hashv(&[&leaf, s.as_ref()]);
+            leaf.copy_from_slice(res.as_ref());
+        } else {
+            let res = solana_program::keccak::hashv(&[s.as_ref(), &leaf]);
+            leaf.copy_from_slice(res.as_ref());
+        }
+    }
+    leaf
+}
 
 
 #[program]
@@ -82,7 +98,14 @@ pub mod mini_ncn {
     }
 
     pub fn initialize_operator(ctx: Context<InitializeOperator>) -> Result<()> {
-        // TODO: link NCN stuff
+        // TODO: in order to let users initialize themself, we need to check NCN stuff
+
+        let voter_state = &mut ctx.accounts.voter_state;
+        voter_state.config = ctx.accounts.config.key();
+        voter_state.operator = ctx.accounts.operator.key();
+        voter_state.last_voted_epoch = 0;
+        voter_state.claimed_rewards = 0;
+
 
         // SKIP: noop log for now
         // wrap_application_data_v1(...)?;
@@ -107,14 +130,15 @@ pub mod mini_ncn {
         Ok(())
     }
 
-    pub fn propose(ctx: Context<Propose>, state: [u8; 32]) -> Result<()> {
+    pub fn propose(ctx: Context<Propose>, new_root: [u8; 32]) -> Result<()> {
         let ballot_box = &mut ctx.accounts.ballot_box;
         let clock = Clock::get()?;
 
-        require!(ballot_box.state.is_none(), MiniNcnError::NonEmptyState);
+        require!(ballot_box.epoch < clock.epoch, MiniNcnError::InvalidEpoch);
+        require!(ballot_box.proposed_rewards_root.is_none(), MiniNcnError::NonEmptyProposedRoot);
 
         // TODO: maybe set consensus threshold here
-        ballot_box.reset(clock.epoch, state);
+        ballot_box.propose(clock.epoch, new_root);
 
         Ok(())
     }
@@ -122,10 +146,15 @@ pub mod mini_ncn {
     // explicitly lifetime is required for remaining_accounts
     pub fn vote<'info>(ctx: Context<'_, '_, '_, 'info, Vote<'info>>, args: VoteArgs) -> Result<()> {
         let ballot_box = &mut ctx.accounts.ballot_box;
+        let voter_state = &mut ctx.accounts.voter_state;
 
         let clock = Clock::get()?;
         require!(
             clock.epoch == ballot_box.epoch,
+            MiniNcnError::InvalidEpoch
+        );
+        require!(
+            clock.epoch > voter_state.last_voted_epoch,
             MiniNcnError::InvalidEpoch
         );
 
@@ -184,34 +213,53 @@ pub mod mini_ncn {
             );
         }
 
+        voter_state.last_voted_epoch = clock.epoch;
+
         Ok(())
     }
 
     pub fn check_consensus(ctx: Context<CheckConsensus>) -> Result<()> {
         let ballot_box = &mut ctx.accounts.ballot_box;
 
-        require!(ballot_box.state.is_some(), MiniNcnError::EmptyState);
+        let proposed_rewards_root = ballot_box.proposed_rewards_root.ok_or(MiniNcnError::EmptyProposedRoot)?;
 
         let vault = Vault::from_bytes(&ctx.accounts.vault.try_borrow_data()?)?;
 
         let clock = Clock::get()?;
-        let vote_window_passed = clock.epoch > ballot_box.epoch;
-        let mut consensus_reached = false;
-
-        // TODO: 
-        if ballot_box.approved_votes > vault.vrt_supply / 2 {
-            consensus_reached = true;
-        }
+        let consensus_reached = ballot_box.approved_votes > vault.vrt_supply * 2 / 3;
 
         if consensus_reached {
             msg!("Consensus reached");
 
-            // TODO: distribute rewards
+            ballot_box.rewards_root = proposed_rewards_root;
+            // TODO: transfer rewards
         }
 
+        let vote_window_passed = clock.epoch > ballot_box.epoch;
         if vote_window_passed || consensus_reached {
-            ballot_box.state = None;
+            ballot_box.proposed_rewards_root = None;
         }
+
+        Ok(())
+    }
+
+    pub fn claim_rewards(ctx: Context<ClaimRewards>, args: ClaimRewardsArgs) -> Result<()> {
+        {
+            let operator = Operator::from_bytes(&ctx.accounts.operator.try_borrow_data()?)?;
+            require!(operator.admin == ctx.accounts.operator_admin.key(), MiniNcnError::InvalidOperator);
+        }
+
+        let leaf = solana_program::keccak::hashv(&[ctx.accounts.operator.key().as_ref(), &args.total_rewards.to_le_bytes()]);
+        let computed_root = recompute(leaf.to_bytes(), &args.proof, args.index);
+
+        require!(computed_root == ctx.accounts.ballot_box.rewards_root, MiniNcnError::InvalidProof);
+
+        let voter_state = &mut ctx.accounts.voter_state;
+
+        let _unclaimed_rewards = args.total_rewards - voter_state.claimed_rewards;
+        // TODO: transfer unclaimed rewards tokens
+
+        voter_state.claimed_rewards = args.total_rewards;
 
         Ok(())
     }
@@ -289,6 +337,12 @@ pub struct InitializeOperator<'info> {
     pub authority: Signer<'info>,
     #[account(mut, seeds = [b"ballot_box", config.key().as_ref()], bump)]
     pub ballot_box: Account<'info, BallotBox>,
+    #[account(
+        init, payer = payer,
+        space = VoterState::DISCRIMINATOR.len() + VoterState::INIT_SPACE,
+        seeds = [b"voter_state", config.key().as_ref(), operator.key().as_ref()], bump
+    )]
+    pub voter_state: Account<'info, VoterState>,
     /// CHECK:
     #[account(mut, address = ballot_box.merkle_tree)]
     pub merkle_tree: UncheckedAccount<'info>,
@@ -300,6 +354,7 @@ pub struct InitializeOperator<'info> {
     /// CHECK:
     #[account(address = NOOP_PROGRAM)]
     pub noop_program: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -325,6 +380,8 @@ pub struct Vote<'info> {
     pub config: Account<'info, Config>,
     #[account(mut, seeds = [b"ballot_box", config.key().as_ref()], bump)]
     pub ballot_box: Account<'info, BallotBox>,
+    #[account(mut, seeds = [b"voter_state", config.key().as_ref(), operator.key().as_ref()], bump)]
+    pub voter_state: Account<'info, VoterState>,
     /// CHECK:
     #[account(mut, address = ballot_box.merkle_tree)]
     pub merkle_tree: UncheckedAccount<'info>,
@@ -354,9 +411,33 @@ pub struct CheckConsensus<'info> {
     #[account(has_one = authority @ MiniNcnError::InvalidAuthority)]
     pub config: Account<'info, Config>,
     /// CHECK:
-    #[account()]
+    #[account(seeds = [b"vault", config.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
     pub vault: UncheckedAccount<'info>,
     pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimRewards<'info> {
+    #[account(address = voter_state.config @ MiniNcnError::ConfigMismatch)]
+    pub config: Account<'info, Config>,
+    #[account(seeds = [b"ballot_box", config.key().as_ref()], bump)]
+    pub ballot_box: Account<'info, BallotBox>,
+    #[account(mut, seeds = [b"voter_state", config.key().as_ref(), operator.key().as_ref()], bump)]
+    pub voter_state: Account<'info, VoterState>,
+    /// CHECK:
+    #[account(seeds = [b"vault", config.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
+    pub vault: UncheckedAccount<'info>,
+    pub operator_admin: Signer<'info>,
+    /// CHECK:
+    #[account(address = voter_state.operator @ MiniNcnError::InvalidOperator)]
+    pub operator: UncheckedAccount<'info>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct ClaimRewardsArgs {
+    pub index: u32,
+    pub total_rewards: u64,
+    pub proof: Vec<[u8; 32]>,
 }
 
 #[account]
@@ -375,17 +456,31 @@ pub struct BallotBox {
     pub operators_voted: u64,
     pub approved_votes: u64,
     pub merkle_tree: Pubkey,
-    pub state: Option<[u8; 32]>,
+    pub rewards_root: [u8; 32],
+    pub proposed_rewards_root: Option<[u8; 32]>,
 }
 
 impl BallotBox {
-    pub fn reset(&mut self, epoch: u64, state: [u8; 32]) {
+    pub fn propose(&mut self, epoch: u64, proposed_rewards_root: [u8; 32]) {
         self.epoch = epoch;
         self.operators_voted = 0;
         self.approved_votes = 0;
-        self.state = Some(state);
+        self.proposed_rewards_root = Some(proposed_rewards_root);
     }
 }
+
+#[account]
+#[derive(InitSpace)]
+pub struct VoterState {
+    pub config: Pubkey,
+    pub operator: Pubkey,
+    // TODO: use those to validate
+    // pub operator_vault_ticket: Pubkey,
+    // pub vault_operator_delegation: Pubkey,
+    pub last_voted_epoch: u64,
+    pub claimed_rewards: u64,
+}
+
 
 #[error_code]
 pub enum MiniNcnError {
@@ -403,8 +498,10 @@ pub enum MiniNcnError {
     InvalidVaultOperatorDelegation,
     #[msg("Invalid epoch")]
     InvalidEpoch,
-    #[msg("Non-empty state")]
-    NonEmptyState,
-    #[msg("No state")]
-    EmptyState,
+    #[msg("Proposed rewards root already exists")]
+    NonEmptyProposedRoot,
+    #[msg("No proposed rewards root")]
+    EmptyProposedRoot,
+    #[msg("Invalid proof")]
+    InvalidProof,
 }

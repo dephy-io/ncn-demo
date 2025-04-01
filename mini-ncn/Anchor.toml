@@ -22,6 +22,9 @@ startup_wait = 3000
 shutdown_wait = 2000
 upgradeable = false
 
+[test.validator]
+slots_per_epoch = "32"
+
 [[test.genesis]]
 address = "RestkWeAVL8fRGgzhfeoqFhsqKRchg6aa1XrcH96z4Q"
 program = "../fixtures/jito_restaking_program.so"

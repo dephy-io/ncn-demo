@@ -39,6 +39,22 @@ describe("mini-ncn", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
+  const nextEpoch = async () => {
+    const epochInfo = await provider.connection.getEpochInfo();
+    const lastSlot = epochInfo.absoluteSlot - epochInfo.slotIndex + epochInfo.slotsInEpoch;
+    console.log('current slot', epochInfo.absoluteSlot, 'waiting for slot', lastSlot);
+
+    return new Promise<void>((resolve) => {
+      let subscriptionId: number;
+      subscriptionId = provider.connection.onSlotChange(({ slot }) => {
+        if (slot > lastSlot) {
+          provider.connection.removeSlotChangeListener(subscriptionId);
+          resolve();
+        }
+      })
+    })
+  }
+
   const miniNcn = anchor.workspace.MiniNcn as Program<MiniNcn>;
 
   let ncnPubkey: web3.PublicKey;
@@ -46,7 +62,7 @@ describe("mini-ncn", () => {
 
   let mint: web3.Keypair;
   let adminStTokenAccount: web3.PublicKey;
-  
+
   let configPubkey: web3.PublicKey;
   let ballotBoxPubkey: web3.PublicKey;
   const merkleTree = web3.Keypair.generate();
@@ -233,7 +249,7 @@ describe("mini-ncn", () => {
           .instruction(),
       ])
       .signers([jitoAdminKeypair])
-      .rpc();
+      .rpc({ skipPreflight: true });
   })
 
 
@@ -266,6 +282,9 @@ describe("mini-ncn", () => {
 
 
   it("propose", async () => {
+    await nextEpoch();
+
+    // TODO: build rewards root
     const data = Array.from(crypto.getRandomValues(new Uint8Array(32)));
     const tx = miniNcn.methods
       .propose(data)
@@ -281,7 +300,7 @@ describe("mini-ncn", () => {
     await tx.rpc();
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
-    assert.deepEqual(ballotBox.state, data);
+    assert.deepEqual(ballotBox.proposedRewardsRoot, data);
   });
 
 
@@ -289,13 +308,16 @@ describe("mini-ncn", () => {
     const merkleTreeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(provider.connection, merkleTree.publicKey);
     const root = merkleTreeAccount.getCurrentRoot();
 
-    const proof = treeData.getProof(0);
+    // a full proof contains 10 nodes
+    // const fullProof = treeData.getProof(0);
+    // this tree has only 2 leaves so we can use a height of 2
+    const proof = treeData.getProof(0, true, 2);
     assert.ok(root.equals(proof.root));
 
     const proofAsAccounts = proof.proof.map(node => ({
-        pubkey: new web3.PublicKey(node),
-        isSigner: false,
-        isWritable: false,
+      pubkey: new web3.PublicKey(node),
+      isSigner: false,
+      isWritable: false,
     }));
 
     const tx = miniNcn.methods
@@ -341,15 +363,15 @@ describe("mini-ncn", () => {
     await tx.rpc();
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
-    assert.isNotNull(ballotBox.state);
+    assert.isNotNull(ballotBox.proposedRewardsRoot);
   })
 
 
   it.skip("check consensus after vote window", async () => {
     // wait for vote window to pass
-    await Bun.sleep(4000);
+    await nextEpoch();
 
-    const {signature, pubkeys} = await miniNcn.methods
+    const { signature, pubkeys } = await miniNcn.methods
       .checkConsensus()
       .accountsPartial({
         ballotBox: ballotBoxPubkey,
@@ -360,6 +382,6 @@ describe("mini-ncn", () => {
       .rpcAndKeys();
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
-    assert.isNull(ballotBox.state);
+    assert.isNull(ballotBox.proposedRewardsRoot);
   })
 });
