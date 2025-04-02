@@ -6,6 +6,7 @@ import { MiniNcn } from "../target/types/mini_ncn";
 import { assert } from "chai";
 import { $ } from "bun";
 import { readFileSync } from "fs";
+import { buildRewardsTree } from "./rewards-tree";
 
 const JITO_RESTAKING_ID = new web3.PublicKey("RestkWeAVL8fRGgzhfeoqFhsqKRchg6aa1XrcH96z4Q");
 const JITO_VAULT_ID = new web3.PublicKey("Vau1t6sLNxnzB7ZDsef8TLbPLfyZMYXH8WTNqUdm9g8");
@@ -111,20 +112,27 @@ describe("mini-ncn", () => {
     await $`${jitoCliAdmin} vault config initialize 10 ${jitoAdminKeypair.publicKey}`
   });
 
-  it("initialize", async () => {
+  const maxDepth = 15;
+  const maxBufferSize = 64;
+  const canopyDepth = 8;
+
+  it("initialize config", async () => {
     const allocTreeIx = await createAllocTreeIx(
       provider.connection,
       merkleTree.publicKey,
       provider.wallet.payer.publicKey,
       {
-        maxDepth: 10,
-        maxBufferSize: 32,
+        maxDepth,
+        maxBufferSize,
       },
-      8,
+      canopyDepth,
     )
 
     const tx = await miniNcn.methods
-      .initialize()
+      .initializeConfig({
+        maxDepth,
+        maxBufferSize,
+      })
       .accounts({
         ncn: ncnPubkey,
         authority: jitoAdminKeypair.publicKey,
@@ -137,6 +145,9 @@ describe("mini-ncn", () => {
     debugPubkeys(pubkeys);
 
     const signature = await tx.rpc();
+
+    const tree = await provider.connection.getAccountInfo(merkleTree.publicKey);
+    console.log('tree size', tree.data?.byteLength, tree.lamports / 1e9);
 
     configPubkey = pubkeys.config;
     ballotBoxPubkey = pubkeys.ballotBox;
@@ -183,7 +194,7 @@ describe("mini-ncn", () => {
     )
 
     const tx = miniNcn.methods
-      .initializeVault(new BN(1_000_000_000))
+      .initializeVault(new BN(1_000))
       .accountsPartial({
         config: configPubkey,
         vault,
@@ -204,7 +215,7 @@ describe("mini-ncn", () => {
     vaultPubkey = pubkeys.vault;
 
     const vaultStTokenAccountInfo = await spl.getAccount(provider.connection, pubkeys.vaultStTokenAccount);
-    assert.equal(vaultStTokenAccountInfo.amount, 1_000_000_000n);
+    assert.equal(vaultStTokenAccountInfo.amount, 1_000n);
   })
 
 
@@ -228,7 +239,7 @@ describe("mini-ncn", () => {
     treeData = MerkleTree.sparseMerkleTreeFromLeaves([
       op0Pubkey.toBuffer(),
       op1Pubkey.toBuffer(),
-    ], 10);
+    ], maxDepth);
 
     await miniNcn.methods
       .initializeOperator()
@@ -281,11 +292,23 @@ describe("mini-ncn", () => {
   })
 
 
+  let operatorRewards;
+  let rewardsTree: MerkleTree;
+
   it("propose", async () => {
     await nextEpoch();
 
-    // TODO: build rewards root
-    const data = Array.from(crypto.getRandomValues(new Uint8Array(32)));
+    operatorRewards = [{
+      operator: op0Pubkey,
+      amount: 123456789n,
+    }, {
+      operator: op1Pubkey,
+      amount: 987654321n,
+    }];
+
+    rewardsTree = buildRewardsTree(operatorRewards);
+
+    const data = Array.from(rewardsTree.root);
     const tx = miniNcn.methods
       .propose(data)
       .accountsPartial({
@@ -304,14 +327,14 @@ describe("mini-ncn", () => {
   });
 
 
-  it("vote", async () => {
+  it("op0 vote", async () => {
     const merkleTreeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(provider.connection, merkleTree.publicKey);
     const root = merkleTreeAccount.getCurrentRoot();
 
-    // a full proof contains 10 nodes
+    // a full proof contains `maxDepth` nodes
     // const fullProof = treeData.getProof(0);
-    // this tree has only 2 leaves so we can use a height of 2
-    const proof = treeData.getProof(0, true, 2);
+    // minimum proof height is `maxDepth - canopyDepth`
+    const proof = treeData.getProof(0, true, maxDepth - canopyDepth);
     assert.ok(root.equals(proof.root));
 
     const proofAsAccounts = proof.proof.map(node => ({
@@ -338,9 +361,7 @@ describe("mini-ncn", () => {
 
     debugPubkeys(await tx.pubkeys());
 
-    await tx.rpc({
-      skipPreflight: true,
-    });
+    await tx.rpc();
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
     assert.equal(ballotBox.operatorsVoted.toNumber(), 1);
@@ -367,10 +388,42 @@ describe("mini-ncn", () => {
   })
 
 
-  it.skip("check consensus after vote window", async () => {
-    // wait for vote window to pass
-    await nextEpoch();
+  it("op1 vote", async () => {
+    const proof = treeData.getProof(1, true, maxDepth - canopyDepth);
 
+    const proofAsAccounts = proof.proof.map(node => ({
+      pubkey: new web3.PublicKey(node),
+      isSigner: false,
+      isWritable: false,
+    }));
+
+    const tx = miniNcn.methods
+      .vote({
+        root: Array.from(proof.root),
+        index: proof.leafIndex,
+        approved: true
+      })
+      .accounts({
+        config: configPubkey,
+        merkleTree: merkleTree.publicKey,
+        operatorAdmin: op1AdminKeypair.publicKey,
+        operator: op1Pubkey,
+        vault: vaultPubkey,
+      })
+      .remainingAccounts(proofAsAccounts)
+      .signers([op1AdminKeypair])
+
+    debugPubkeys(await tx.pubkeys());
+
+    await tx.rpc();
+
+    const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
+    assert.equal(ballotBox.operatorsVoted.toNumber(), 2);
+    assert.equal(ballotBox.approvedVotes.toNumber(), 1234567890);
+  });
+
+
+  it("check consensus again", async () => {
     const { signature, pubkeys } = await miniNcn.methods
       .checkConsensus()
       .accountsPartial({
@@ -384,4 +437,35 @@ describe("mini-ncn", () => {
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
     assert.isNull(ballotBox.proposedRewardsRoot);
   })
+
+  it("claim rewards for op0", async () => {
+    const { proof, leafIndex, root } = rewardsTree.getProof(0)
+
+    const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
+    assert.deepEqual(ballotBox.rewardsRoot, Array.from(root));
+
+    const tx = await miniNcn.methods
+      .claimRewards({
+        index: leafIndex,
+        totalRewards: new BN(operatorRewards[leafIndex].amount.toString()),
+        proof: proof.map(node => Array.from(node)),
+      })
+      .accountsPartial({
+        config: configPubkey,
+        operatorAdmin: op0AdminKeypair.publicKey,
+        operator: op0Pubkey,
+      })
+      .signers([op0AdminKeypair])
+
+    const pubkeys = await tx.pubkeys();
+    debugPubkeys(pubkeys);
+
+    const voterState = await miniNcn.account.voterState.fetch(pubkeys.voterState);
+    assert.equal(voterState.claimedRewards.toNumber(), 0);
+
+    await tx.rpc();
+
+    const voterStateAfter = await miniNcn.account.voterState.fetch(pubkeys.voterState);
+    assert.equal(voterStateAfter.claimedRewards.toString(), operatorRewards[leafIndex].amount.toString());
+  });
 });

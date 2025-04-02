@@ -36,7 +36,7 @@ pub mod mini_ncn {
 
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    pub fn initialize_config(ctx: Context<InitializeConfig>, args: InitializeConfigArgs) -> Result<()> {
         let config = &mut ctx.accounts.config;
         config.ncn = ctx.accounts.ncn.key();
         config.authority = ctx.accounts.authority.key();
@@ -53,8 +53,8 @@ pub mod mini_ncn {
                     &[b"ballot_box", config.key().as_ref(), &[ctx.bumps.ballot_box]],
                 ],
             ),
-            10,
-            32,
+            args.max_depth,
+            args.max_buffer_size,
         )?;
 
         let ballot_box = &mut ctx.accounts.ballot_box;
@@ -266,7 +266,7 @@ pub mod mini_ncn {
 }
 
 #[derive(Accounts)]
-pub struct Initialize<'info> {
+pub struct InitializeConfig<'info> {
     #[account(init, payer = payer,
         space = Config::DISCRIMINATOR.len() + Config::INIT_SPACE,
         seeds = [b"mini_ncn", ncn.key().as_ref()], bump
@@ -292,6 +292,13 @@ pub struct Initialize<'info> {
     #[account(address = NOOP_PROGRAM)]
     pub noop_program: UncheckedAccount<'info>,
 }
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct InitializeConfigArgs {   
+    pub max_depth: u32,
+    pub max_buffer_size: u32,
+}
+
 
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {

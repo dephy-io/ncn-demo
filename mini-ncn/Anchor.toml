@@ -15,7 +15,7 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "bun run -b ts-mocha ./tsconfig.json -t 1000000 tests/*.ts"
+test = "bun run -b ts-mocha ./tsconfig.json -t 1000000 tests/*.test.ts"
 
 [test]
 startup_wait = 3000
