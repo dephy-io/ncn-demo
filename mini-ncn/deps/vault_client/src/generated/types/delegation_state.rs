@@ -4,9 +4,10 @@
 //!
 //! <https://github.com/kinobi-so/kinobi>
 
+use anchor_lang::InitSpace;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Eq, PartialEq)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Eq, PartialEq, InitSpace)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DelegationState {
     pub staked_amount: u64,
