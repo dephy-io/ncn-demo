@@ -4,12 +4,13 @@
 //!
 //! <https://github.com/kinobi-so/kinobi>
 
+use anchor_lang::InitSpace;
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::pubkey::Pubkey;
 
 use crate::generated::types::DelegationState;
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Eq, PartialEq)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Eq, PartialEq, InitSpace)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vault {
     pub discriminator: u64,
@@ -115,6 +116,8 @@ impl Vault {
         let mut data = data;
         Self::deserialize(&mut data)
     }
+
+    pub const LEN: usize = 1111;
 }
 
 impl<'a> TryFrom<&solana_program::account_info::AccountInfo<'a>> for Vault {

@@ -29,6 +29,7 @@ const jitoAdminKeypair = loadKey('../keys/jito-admin.json');
 const op0AdminKeypair = loadKey('../keys/op0-admin.json');
 const op1AdminKeypair = loadKey('../keys/op1-admin.json');
 const userKeypair = loadKey('../keys/user.json');
+const authority = web3.Keypair.generate();
 
 const jitoCli = ['jito-restaking-cli', '--rpc-url', 'http://127.0.0.1:8899']
 const jitoCliAdmin = [...jitoCli, '--keypair', '../keys/jito-admin.json']
@@ -60,6 +61,7 @@ describe("mini-ncn", () => {
 
   let ncnPubkey: web3.PublicKey;
   let vaultPubkey: web3.PublicKey;
+  let vaultAdminPubkey: web3.PublicKey;
 
   let mint: web3.Keypair;
   let adminStTokenAccount: web3.PublicKey;
@@ -74,49 +76,46 @@ describe("mini-ncn", () => {
     await provider.connection.requestAirdrop(op0AdminKeypair.publicKey, web3.LAMPORTS_PER_SOL * 10)
     await provider.connection.requestAirdrop(op1AdminKeypair.publicKey, web3.LAMPORTS_PER_SOL * 10)
     await provider.connection.requestAirdrop(userKeypair.publicKey, web3.LAMPORTS_PER_SOL * 10)
-    await Bun.sleep(400);
+    await Bun.sleep(500);
 
+    // those configs are initialized by jito
     await $`${jitoCliAdmin} restaking config initialize`
-
-    const output = await $`${jitoCliAdmin} restaking ncn initialize`
-    ncnPubkey = getInitializedAddress(output.stderr.toString())
-
-    mint = web3.Keypair.generate();
-
-    await spl.createMint(
-      provider.connection,
-      provider.wallet.payer,
-      jitoAdminKeypair.publicKey,
-      null,
-      9,
-      mint,
-    )
-
-    adminStTokenAccount = await spl.createAssociatedTokenAccount(
-      provider.connection,
-      provider.wallet.payer,
-      mint.publicKey,
-      jitoAdminKeypair.publicKey,
-    )
-
-    await spl.mintTo(
-      provider.connection,
-      provider.wallet.payer,
-      mint.publicKey,
-      adminStTokenAccount,
-      jitoAdminKeypair,
-      web3.LAMPORTS_PER_SOL * 1000,
-    )
-
-    // prepare jito vault
     await $`${jitoCliAdmin} vault config initialize 10 ${jitoAdminKeypair.publicKey}`
   });
+
+  it("initialize ncn", async () => {
+    const base = web3.Keypair.generate();
+
+    const tx = await miniNcn.methods
+      .initializeNcn()
+      .accounts({
+        base: base.publicKey,
+        authority: authority.publicKey,
+      })
+      .signers([authority, base])
+
+    const pubkeys = await tx.pubkeys();
+    debugPubkeys(pubkeys);
+
+    ncnPubkey = pubkeys.ncn;
+
+    await tx.rpc();
+
+    configPubkey = pubkeys.config;
+
+    const config = await miniNcn.account.config.fetch(configPubkey);
+    assert.ok(config.authority.equals(authority.publicKey));
+
+    const ncnAdmin = await provider.connection.getAccountInfo(pubkeys.ncnAdmin);
+    console.log('ncn admin', ncnAdmin);
+  })
+
 
   const maxDepth = 15;
   const maxBufferSize = 64;
   const canopyDepth = 8;
 
-  it("initialize config", async () => {
+  it("initialize ballot box", async () => {
     const allocTreeIx = await createAllocTreeIx(
       provider.connection,
       merkleTree.publicKey,
@@ -129,17 +128,17 @@ describe("mini-ncn", () => {
     )
 
     const tx = await miniNcn.methods
-      .initializeConfig({
+      .initializeBallotBox({
         maxDepth,
         maxBufferSize,
       })
       .accounts({
         ncn: ncnPubkey,
-        authority: jitoAdminKeypair.publicKey,
+        authority: authority.publicKey,
         merkleTree: merkleTree.publicKey,
       })
       .preInstructions([allocTreeIx])
-      .signers([jitoAdminKeypair, merkleTree])
+      .signers([authority, merkleTree])
 
     const pubkeys = await tx.pubkeys();
     debugPubkeys(pubkeys);
@@ -149,11 +148,7 @@ describe("mini-ncn", () => {
     const tree = await provider.connection.getAccountInfo(merkleTree.publicKey);
     console.log('tree size', tree.data?.byteLength, tree.lamports / 1e9);
 
-    configPubkey = pubkeys.config;
     ballotBoxPubkey = pubkeys.ballotBox;
-
-    const config = await miniNcn.account.config.fetch(configPubkey);
-    assert.ok(config.authority.equals(jitoAdminKeypair.publicKey));
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
     assert.ok(ballotBox.config.equals(configPubkey));
@@ -162,14 +157,20 @@ describe("mini-ncn", () => {
 
 
   it("initialize vault", async () => {
+    mint = web3.Keypair.generate();
+
+    await spl.createMint(
+      provider.connection,
+      provider.wallet.payer,
+      authority.publicKey,
+      null,
+      9,
+      mint,
+    )
+
     const vrtMint = web3.PublicKey.findProgramAddressSync(
       [Buffer.from('vrt_mint'), mint.publicKey.toBuffer()],
       miniNcn.programId
-    )[0];
-
-    const vault = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from('vault'), configPubkey.toBuffer()],
-      JITO_VAULT_ID
     )[0];
 
     const burnVault = web3.PublicKey.findProgramAddressSync(
@@ -182,40 +183,67 @@ describe("mini-ncn", () => {
       owner: burnVault,
     });
 
+    vaultPubkey = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from('vault'), configPubkey.toBuffer()],
+      JITO_VAULT_ID
+    )[0];
+
+    vaultAdminPubkey = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from('vault_admin'), vaultPubkey.toBuffer()],
+      miniNcn.programId
+    )[0];
+
     const vaultStTokenAccount = await spl.createAssociatedTokenAccount(
       provider.connection,
       provider.wallet.payer,
       mint.publicKey,
-      vault,
+      vaultPubkey,
       null,
       spl.TOKEN_PROGRAM_ID,
       spl.ASSOCIATED_TOKEN_PROGRAM_ID,
       true,
     )
 
+    adminStTokenAccount = await spl.createAssociatedTokenAccount(
+      provider.connection,
+      provider.wallet.payer,
+      mint.publicKey,
+      vaultAdminPubkey,
+      null,
+      spl.TOKEN_PROGRAM_ID,
+      spl.ASSOCIATED_TOKEN_PROGRAM_ID,
+      true,
+    )
+
+    await spl.mintTo(
+      provider.connection,
+      provider.wallet.payer,
+      mint.publicKey,
+      adminStTokenAccount,
+      authority,
+      web3.LAMPORTS_PER_SOL * 1000,
+    )
+
     const tx = miniNcn.methods
       .initializeVault(new BN(1_000))
       .accountsPartial({
         config: configPubkey,
-        vault,
         stMint: mint.publicKey,
-        admin: jitoAdminKeypair.publicKey,
-        adminStTokenAccount,
-        vaultStTokenAccount,
-        vrtMint: vrtMint,
+        authority: authority.publicKey,
         burnVaultVrtTokenAccount,
       })
-      .signers([jitoAdminKeypair]);
+      .signers([authority]);
 
     const pubkeys = await tx.pubkeys();
     debugPubkeys(pubkeys);
 
     const signature = await tx.rpc();
 
-    vaultPubkey = pubkeys.vault;
-
     const vaultStTokenAccountInfo = await spl.getAccount(provider.connection, pubkeys.vaultStTokenAccount);
     assert.equal(vaultStTokenAccountInfo.amount, 1_000n);
+
+    const vaultAdmin = await provider.connection.getAccountInfo(pubkeys.vaultAdmin);
+    console.log('vault admin', vaultAdmin);
   })
 
 
@@ -223,17 +251,12 @@ describe("mini-ncn", () => {
   let op1Pubkey: web3.PublicKey;
   let treeData: MerkleTree;
   it("initialize operators", async () => {
+    // operators can initialize their own accounts
     const op0Output = await $`${jitoCliOp0} restaking operator initialize 1000`
     op0Pubkey = getInitializedAddress(op0Output.stderr.toString());
-    await $`${jitoCliOp0} restaking operator initialize-operator-vault-ticket ${op0Pubkey} ${vaultPubkey}`
-    await $`${jitoCliAdmin} vault vault initialize-operator-delegation ${vaultPubkey} ${op0Pubkey}`
 
     const op1Output = await $`${jitoCliOp1} restaking operator initialize 2000`
     op1Pubkey = getInitializedAddress(op1Output.stderr.toString());
-    await $`${jitoCliOp1} restaking operator initialize-operator-vault-ticket ${op1Pubkey} ${vaultPubkey}`
-    await $`${jitoCliAdmin} vault vault initialize-operator-delegation ${vaultPubkey} ${op1Pubkey}`
-
-    // await $`${jitoCli} restaking operator list
 
     // build the tree offline
     treeData = MerkleTree.sparseMerkleTreeFromLeaves([
@@ -241,26 +264,29 @@ describe("mini-ncn", () => {
       op1Pubkey.toBuffer(),
     ], maxDepth);
 
-    await miniNcn.methods
+    const tx = miniNcn.methods
       .initializeOperator()
-      .accountsPartial({
+      .accounts({
         config: configPubkey,
-        authority: jitoAdminKeypair.publicKey,
+        operatorAdmin: op0AdminKeypair.publicKey,
         merkleTree: merkleTree.publicKey,
         operator: op0Pubkey,
       })
-      .postInstructions([
-        await miniNcn.methods.initializeOperator()
-          .accountsPartial({
-            config: configPubkey,
-            authority: jitoAdminKeypair.publicKey,
-            merkleTree: merkleTree.publicKey,
-            operator: op1Pubkey,
-          })
-          .instruction(),
-      ])
-      .signers([jitoAdminKeypair])
-      .rpc({ skipPreflight: true });
+      .signers([op0AdminKeypair]);
+
+    debugPubkeys(await tx.pubkeys());
+    await tx.rpc();
+
+    await miniNcn.methods
+      .initializeOperator()
+      .accounts({
+        config: configPubkey,
+        operatorAdmin: op1AdminKeypair.publicKey,
+        merkleTree: merkleTree.publicKey,
+        operator: op1Pubkey,
+      })
+      .signers([op1AdminKeypair])
+      .rpc()
   })
 
 
@@ -277,18 +303,36 @@ describe("mini-ncn", () => {
       provider.wallet.payer,
       mint.publicKey,
       userStTokenAccount,
-      jitoAdminKeypair,
+      authority,
       web3.LAMPORTS_PER_SOL * 100,
     )
 
     const userStTokenAccountInfo = await spl.getAccount(provider.connection, userStTokenAccount);
     assert.equal(userStTokenAccountInfo.amount, BigInt(web3.LAMPORTS_PER_SOL * 100));
 
+    // this step is user converting st to vrt
     await $`${jitoCliUser} vault vault mint-vrt ${vaultPubkey} 1234567890 1234567890`
 
     // delegate to operators
-    await $`${jitoCliAdmin} vault vault delegate-to-operator ${vaultPubkey} ${op0Pubkey} 234567890`
-    await $`${jitoCliAdmin} vault vault delegate-to-operator ${vaultPubkey} ${op1Pubkey} 1000000000`
+    await miniNcn.methods
+      .delegateOperator(new BN(234567890))
+      .accounts({
+        config: configPubkey,
+        operator: op0Pubkey,
+        authority: authority.publicKey,
+      })
+      .signers([authority])
+      .rpc();
+
+    await miniNcn.methods
+      .delegateOperator(new BN(1000000000))
+      .accounts({
+        config: configPubkey,
+        operator: op1Pubkey,
+        authority: authority.publicKey,
+      })
+      .signers([authority])
+      .rpc();
   })
 
 
@@ -311,12 +355,11 @@ describe("mini-ncn", () => {
     const data = Array.from(rewardsTree.root);
     const tx = miniNcn.methods
       .propose(data)
-      .accountsPartial({
+      .accounts({
         config: configPubkey,
-        ballotBox: ballotBoxPubkey,
-        authority: jitoAdminKeypair.publicKey,
+        authority: authority.publicKey,
       })
-      .signers([jitoAdminKeypair])
+      .signers([authority])
 
     debugPubkeys(await tx.pubkeys());
 
@@ -354,7 +397,6 @@ describe("mini-ncn", () => {
         merkleTree: merkleTree.publicKey,
         operatorAdmin: op0AdminKeypair.publicKey,
         operator: op0Pubkey,
-        vault: vaultPubkey,
       })
       .remainingAccounts(proofAsAccounts)
       .signers([op0AdminKeypair])
@@ -372,12 +414,11 @@ describe("mini-ncn", () => {
   it("check consensus", async () => {
     const tx = await miniNcn.methods
       .checkConsensus()
-      .accountsPartial({
-        ballotBox: ballotBoxPubkey,
-        authority: jitoAdminKeypair.publicKey,
-        vault: vaultPubkey,
+      .accounts({
+        config: configPubkey,
+        authority: authority.publicKey,
       })
-      .signers([jitoAdminKeypair])
+      .signers([authority])
 
     debugPubkeys(await tx.pubkeys());
 
@@ -408,7 +449,6 @@ describe("mini-ncn", () => {
         merkleTree: merkleTree.publicKey,
         operatorAdmin: op1AdminKeypair.publicKey,
         operator: op1Pubkey,
-        vault: vaultPubkey,
       })
       .remainingAccounts(proofAsAccounts)
       .signers([op1AdminKeypair])
@@ -424,15 +464,14 @@ describe("mini-ncn", () => {
 
 
   it("check consensus again", async () => {
-    const { signature, pubkeys } = await miniNcn.methods
+    await miniNcn.methods
       .checkConsensus()
-      .accountsPartial({
-        ballotBox: ballotBoxPubkey,
-        authority: jitoAdminKeypair.publicKey,
-        vault: vaultPubkey,
+      .accounts({
+        config: configPubkey,
+        authority: authority.publicKey,
       })
-      .signers([jitoAdminKeypair])
-      .rpcAndKeys();
+      .signers([authority])
+      .rpc();
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
     assert.isNull(ballotBox.proposedRewardsRoot);
@@ -450,7 +489,7 @@ describe("mini-ncn", () => {
         totalRewards: new BN(operatorRewards[leafIndex].amount.toString()),
         proof: proof.map(node => Array.from(node)),
       })
-      .accountsPartial({
+      .accounts({
         config: configPubkey,
         operatorAdmin: op0AdminKeypair.publicKey,
         operator: op0Pubkey,
