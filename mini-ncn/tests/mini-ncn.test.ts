@@ -371,21 +371,21 @@ describe("mini-ncn", () => {
   })
 
 
-  let operatorRewards;
+  let userRewards;
   let rewardsTree: MerkleTree;
 
   it("propose", async () => {
     await nextEpoch();
 
-    operatorRewards = [{
-      operator: op0Pubkey,
+    userRewards = [{
+      user: op0AdminKeypair.publicKey,
       amount: 123456789n,
     }, {
-      operator: op1Pubkey,
+      user: op1AdminKeypair.publicKey,
       amount: 987654321n,
     }];
 
-    rewardsTree = buildRewardsTree(operatorRewards);
+    rewardsTree = buildRewardsTree(userRewards);
 
     const data = Array.from(rewardsTree.root);
     const tx = miniNcn.methods
@@ -563,14 +563,13 @@ describe("mini-ncn", () => {
     const tx = miniNcn.methods
       .claimRewards({
         index: leafIndex,
-        totalRewards: new BN(operatorRewards[leafIndex].amount.toString()),
+        totalRewards: new BN(userRewards[leafIndex].amount.toString()),
         proof: proof.map(node => Array.from(node)),
       })
       .accounts({
         config: configPubkey,
-        operatorAdmin: op0AdminKeypair.publicKey,
-        operator: op0Pubkey,
         rewardsMint: rewardsMint.publicKey,
+        owner: op0AdminKeypair.publicKey,
         beneficiaryTokenAccount,
         rewardsTokenProgram,
       })
@@ -579,18 +578,15 @@ describe("mini-ncn", () => {
     const pubkeys = await tx.pubkeys();
     debugPubkeys(pubkeys);
 
-    const voterState = await miniNcn.account.voterState.fetch(pubkeys.voterState);
-    assert.equal(voterState.claimedRewards.toNumber(), 0);
-
     await tx.rpc();
 
-    const voterStateAfter = await miniNcn.account.voterState.fetch(pubkeys.voterState);
-    assert.equal(voterStateAfter.claimedRewards.toString(), operatorRewards[leafIndex].amount.toString());
+    const rewardsStateAfter = await miniNcn.account.rewardsState.fetch(pubkeys.rewardsState);
+    assert.equal(rewardsStateAfter.claimedRewards.toString(), userRewards[leafIndex].amount.toString());
 
     const rewardsTokenAccountInfo = await spl.getAccount(provider.connection, rewardsTokenAccount);
-    assert.equal(rewardsTokenAccountInfo.amount, fundAmount - operatorRewards[leafIndex].amount);
+    assert.equal(rewardsTokenAccountInfo.amount, fundAmount - userRewards[leafIndex].amount);
 
     const beneficiaryTokenAccountInfo = await spl.getAccount(provider.connection, beneficiaryTokenAccount);
-    assert.equal(beneficiaryTokenAccountInfo.amount, operatorRewards[leafIndex].amount);
+    assert.equal(beneficiaryTokenAccountInfo.amount, userRewards[leafIndex].amount);
   });
 });

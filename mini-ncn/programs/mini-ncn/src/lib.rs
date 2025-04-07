@@ -209,7 +209,6 @@ pub mod mini_ncn {
         voter_state.config = ctx.accounts.config.key();
         voter_state.operator = ctx.accounts.operator.key();
         voter_state.last_voted_epoch = 0;
-        voter_state.claimed_rewards = 0;
         voter_state.operator_vault_ticket = ctx.accounts.operator_vault_ticket.key();
         voter_state.vault_operator_delegation = ctx.accounts.vault_operator_delegation.key();
 
@@ -426,16 +425,8 @@ pub mod mini_ncn {
 
 
     pub fn claim_rewards(ctx: Context<ClaimRewards>, args: ClaimRewardsArgs) -> Result<()> {
-        {
-            let operator = Operator::from_bytes(&ctx.accounts.operator.try_borrow_data()?)?;
-            require_eq!(
-                operator.admin, ctx.accounts.operator_admin.key(),
-                MiniNcnError::InvalidOperator
-            );
-        }
-
         let leaf = solana_program::keccak::hashv(&[
-            ctx.accounts.operator.key().as_ref(),
+            ctx.accounts.owner.key().as_ref(),
             &args.total_rewards.to_le_bytes(),
         ]);
         let computed_root = recompute(leaf.to_bytes(), &args.proof, args.index);
@@ -445,10 +436,12 @@ pub mod mini_ncn {
             MiniNcnError::InvalidProof
         );
 
-        let voter_state = &mut ctx.accounts.voter_state;
+        let rewards_state = &mut ctx.accounts.rewards_state;
 
         // transfer unclaimed rewards tokens
-        let unclaimed_rewards = args.total_rewards - voter_state.claimed_rewards;
+        let unclaimed_rewards = args.total_rewards - rewards_state.claimed_rewards;
+        require!(unclaimed_rewards > 0, MiniNcnError::AlreadyClaimed);
+
         anchor_spl::token_interface::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.rewards_token_program.to_account_info(),
@@ -468,7 +461,8 @@ pub mod mini_ncn {
             ctx.accounts.rewards_mint.decimals,
         )?;
 
-        voter_state.claimed_rewards = args.total_rewards;
+        rewards_state.owner = ctx.accounts.owner.key();
+        rewards_state.claimed_rewards = args.total_rewards;
 
         Ok(())
     }
@@ -753,21 +747,12 @@ pub struct FundRewards<'info> {
 
 #[derive(Accounts)]
 pub struct ClaimRewards<'info> {
-    #[account(address = voter_state.config @ MiniNcnError::ConfigMismatch)]
+    #[account()]
     pub config: Account<'info, Config>,
     #[account(seeds = [b"ballot_box", config.key().as_ref()], bump)]
     pub ballot_box: Account<'info, BallotBox>,
-    #[account(mut, seeds = [b"voter_state", config.key().as_ref(), operator.key().as_ref()], bump)]
-    pub voter_state: Account<'info, VoterState>,
-    /// CHECK:
-    #[account(seeds = [b"vault", config.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
-    pub vault: UncheckedAccount<'info>,
     #[account(seeds = [b"ncn_admin", config.ncn.as_ref()], bump)]
     pub ncn_admin: SystemAccount<'info>,
-    pub operator_admin: Signer<'info>,
-    /// CHECK:
-    #[account(address = voter_state.operator @ MiniNcnError::InvalidOperator)]
-    pub operator: UncheckedAccount<'info>,
     #[account(mint::token_program = rewards_token_program)]
     pub rewards_mint: InterfaceAccount<'info, anchor_spl::token_interface::Mint>,
     #[account(
@@ -777,9 +762,20 @@ pub struct ClaimRewards<'info> {
         associated_token::token_program = rewards_token_program
     )]
     pub rewards_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
+    pub owner: Signer<'info>,
+    #[account(
+        init_if_needed, payer = payer,
+        space = RewardsState::DISCRIMINATOR.len() + RewardsState::INIT_SPACE,
+        seeds = [b"rewards_state", owner.key().as_ref()],
+        bump
+    )]
+    pub rewards_state: Account<'info, RewardsState>,
     #[account(mut, token::mint = rewards_mint.key(), token::token_program = rewards_token_program)]
     pub beneficiary_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
-    pub rewards_token_program: Interface<'info, TokenInterface>
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub rewards_token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
 }
 
 
@@ -828,8 +824,15 @@ pub struct VoterState {
     pub operator_vault_ticket: Pubkey,
     pub vault_operator_delegation: Pubkey,
     pub last_voted_epoch: u64,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct RewardsState {
+    pub owner: Pubkey,
     pub claimed_rewards: u64,
 }
+
 
 #[error_code]
 pub enum MiniNcnError {
@@ -853,4 +856,6 @@ pub enum MiniNcnError {
     EmptyProposedRoot,
     #[msg("Invalid proof")]
     InvalidProof,
+    #[msg("Already claimed")]
+    AlreadyClaimed,
 }

@@ -21,7 +21,7 @@ idl-build = [
 
 
 [dependencies]
-anchor-lang = { workspace = true }
+anchor-lang = { workspace = true, features = ["init-if-needed"] }
 anchor-spl = { workspace = true }
 jito-restaking-client = { path = "../../deps/restaking_client", features = ["anchor"]}
 jito-vault-client = { path = "../../deps/vault_client", features = ["anchor"]}
