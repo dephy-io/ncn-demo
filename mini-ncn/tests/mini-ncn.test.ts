@@ -63,8 +63,13 @@ describe("mini-ncn", () => {
   let vaultPubkey: web3.PublicKey;
   let vaultAdminPubkey: web3.PublicKey;
 
-  let mint: web3.Keypair;
+  let stMint: web3.Keypair;
   let adminStTokenAccount: web3.PublicKey;
+
+  const rewardsTokenProgram = spl.TOKEN_PROGRAM_ID;
+  let rewardsMint: web3.Keypair;
+  let rewardsTokenAccount: web3.PublicKey;
+  let funderTokenAccount: web3.PublicKey;
 
   let configPubkey: web3.PublicKey;
   let ballotBoxPubkey: web3.PublicKey;
@@ -81,16 +86,39 @@ describe("mini-ncn", () => {
     // those configs are initialized by jito
     await $`${jitoCliAdmin} restaking config initialize`
     await $`${jitoCliAdmin} vault config initialize 10 ${jitoAdminKeypair.publicKey}`
+
+    // prepare rewards token
+    rewardsMint = web3.Keypair.generate();
+    await spl.createMint(
+      provider.connection,
+      provider.wallet.payer,
+      authority.publicKey,
+      null,
+      9,
+      rewardsMint,
+      null,
+      rewardsTokenProgram,
+    )
+
+    funderTokenAccount = await spl.createAssociatedTokenAccount(
+      provider.connection,
+      provider.wallet.payer,
+      rewardsMint.publicKey,
+      authority.publicKey,
+      null,
+      rewardsTokenProgram,
+    )
   });
 
   it("initialize ncn", async () => {
     const base = web3.Keypair.generate();
-
-    const tx = await miniNcn.methods
+    const tx = miniNcn.methods
       .initializeNcn()
-      .accounts({
+      .accountsPartial({
         base: base.publicKey,
         authority: authority.publicKey,
+        rewardsMint: rewardsMint.publicKey,
+        rewardsTokenProgram,
       })
       .signers([authority, base])
 
@@ -98,6 +126,13 @@ describe("mini-ncn", () => {
     debugPubkeys(pubkeys);
 
     ncnPubkey = pubkeys.ncn;
+
+    rewardsTokenAccount = spl.getAssociatedTokenAddressSync(
+      rewardsMint.publicKey,
+      pubkeys.ncnAdmin,
+      true,
+      rewardsTokenProgram,
+    )
 
     await tx.rpc();
 
@@ -157,7 +192,7 @@ describe("mini-ncn", () => {
 
 
   it("initialize vault", async () => {
-    mint = web3.Keypair.generate();
+    stMint = web3.Keypair.generate();
 
     await spl.createMint(
       provider.connection,
@@ -165,11 +200,11 @@ describe("mini-ncn", () => {
       authority.publicKey,
       null,
       9,
-      mint,
+      stMint,
     )
 
     const vrtMint = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from('vrt_mint'), mint.publicKey.toBuffer()],
+      [Buffer.from('vrt_mint'), stMint.publicKey.toBuffer()],
       miniNcn.programId
     )[0];
 
@@ -196,7 +231,7 @@ describe("mini-ncn", () => {
     const vaultStTokenAccount = await spl.createAssociatedTokenAccount(
       provider.connection,
       provider.wallet.payer,
-      mint.publicKey,
+      stMint.publicKey,
       vaultPubkey,
       null,
       spl.TOKEN_PROGRAM_ID,
@@ -207,7 +242,7 @@ describe("mini-ncn", () => {
     adminStTokenAccount = await spl.createAssociatedTokenAccount(
       provider.connection,
       provider.wallet.payer,
-      mint.publicKey,
+      stMint.publicKey,
       vaultAdminPubkey,
       null,
       spl.TOKEN_PROGRAM_ID,
@@ -218,7 +253,7 @@ describe("mini-ncn", () => {
     await spl.mintTo(
       provider.connection,
       provider.wallet.payer,
-      mint.publicKey,
+      stMint.publicKey,
       adminStTokenAccount,
       authority,
       web3.LAMPORTS_PER_SOL * 1000,
@@ -228,7 +263,7 @@ describe("mini-ncn", () => {
       .initializeVault(new BN(1_000))
       .accountsPartial({
         config: configPubkey,
-        stMint: mint.publicKey,
+        stMint: stMint.publicKey,
         authority: authority.publicKey,
         burnVaultVrtTokenAccount,
       })
@@ -294,14 +329,14 @@ describe("mini-ncn", () => {
     const userStTokenAccount = await spl.createAssociatedTokenAccount(
       provider.connection,
       provider.wallet.payer,
-      mint.publicKey,
+      stMint.publicKey,
       userKeypair.publicKey,
     )
 
     await spl.mintTo(
       provider.connection,
       provider.wallet.payer,
-      mint.publicKey,
+      stMint.publicKey,
       userStTokenAccount,
       authority,
       web3.LAMPORTS_PER_SOL * 100,
@@ -477,13 +512,55 @@ describe("mini-ncn", () => {
     assert.isNull(ballotBox.proposedRewardsRoot);
   })
 
+  const fundAmount = 1000_000_000_000n;
+  it("fund rewards", async () => {
+    await spl.mintToChecked(
+      provider.connection,
+      provider.wallet.payer,
+      rewardsMint.publicKey,
+      funderTokenAccount,
+      authority,
+      1000_000_000_000,
+      9,
+      [],
+      null,
+      rewardsTokenProgram,
+    )
+
+    const tx = miniNcn.methods
+      .fundRewards(new BN(fundAmount.toString()))
+      .accounts({
+        config: configPubkey,
+        rewardsMint: rewardsMint.publicKey,
+        funder: authority.publicKey,
+        fundTokenAccount: funderTokenAccount,
+        rewardsTokenProgram,
+      })
+      .signers([authority])
+
+    debugPubkeys(await tx.pubkeys());
+    await tx.rpc();
+
+    const rewardsTokenAccountInfo = await spl.getAccount(provider.connection, rewardsTokenAccount);
+    assert.equal(rewardsTokenAccountInfo.amount, fundAmount);
+  })
+
   it("claim rewards for op0", async () => {
     const { proof, leafIndex, root } = rewardsTree.getProof(0)
 
     const ballotBox = await miniNcn.account.ballotBox.fetch(ballotBoxPubkey);
     assert.deepEqual(ballotBox.rewardsRoot, Array.from(root));
 
-    const tx = await miniNcn.methods
+    const beneficiaryTokenAccount = await spl.createAssociatedTokenAccount(
+      provider.connection,
+      provider.wallet.payer,
+      rewardsMint.publicKey,
+      op0AdminKeypair.publicKey,
+      null,
+      rewardsTokenProgram,
+    )
+
+    const tx = miniNcn.methods
       .claimRewards({
         index: leafIndex,
         totalRewards: new BN(operatorRewards[leafIndex].amount.toString()),
@@ -493,6 +570,9 @@ describe("mini-ncn", () => {
         config: configPubkey,
         operatorAdmin: op0AdminKeypair.publicKey,
         operator: op0Pubkey,
+        rewardsMint: rewardsMint.publicKey,
+        beneficiaryTokenAccount,
+        rewardsTokenProgram,
       })
       .signers([op0AdminKeypair])
 
@@ -506,5 +586,11 @@ describe("mini-ncn", () => {
 
     const voterStateAfter = await miniNcn.account.voterState.fetch(pubkeys.voterState);
     assert.equal(voterStateAfter.claimedRewards.toString(), operatorRewards[leafIndex].amount.toString());
+
+    const rewardsTokenAccountInfo = await spl.getAccount(provider.connection, rewardsTokenAccount);
+    assert.equal(rewardsTokenAccountInfo.amount, fundAmount - operatorRewards[leafIndex].amount);
+
+    const beneficiaryTokenAccountInfo = await spl.getAccount(provider.connection, beneficiaryTokenAccount);
+    assert.equal(beneficiaryTokenAccountInfo.amount, operatorRewards[leafIndex].amount);
   });
 });
