@@ -1,6 +1,7 @@
 #![allow(unexpected_cfgs)]
 
 use anchor_lang::{prelude::*, solana_program};
+use anchor_spl::token_interface::TokenInterface;
 use jito_restaking_client::programs::JITO_RESTAKING_ID;
 use jito_vault_client::programs::JITO_VAULT_ID;
 
@@ -209,6 +210,8 @@ pub mod mini_ncn {
         voter_state.operator = ctx.accounts.operator.key();
         voter_state.last_voted_epoch = 0;
         voter_state.claimed_rewards = 0;
+        voter_state.operator_vault_ticket = ctx.accounts.operator_vault_ticket.key();
+        voter_state.vault_operator_delegation = ctx.accounts.vault_operator_delegation.key();
 
         // SKIP: noop log for now
         // wrap_application_data_v1(...)?;
@@ -278,7 +281,7 @@ pub mod mini_ncn {
         let voter_state = &mut ctx.accounts.voter_state;
 
         let clock = Clock::get()?;
-        require!(clock.epoch == ballot_box.epoch, MiniNcnError::InvalidEpoch);
+        require_eq!(clock.epoch, ballot_box.epoch, MiniNcnError::InvalidEpoch);
         require!(
             clock.epoch > voter_state.last_voted_epoch,
             MiniNcnError::InvalidEpoch
@@ -290,10 +293,7 @@ pub mod mini_ncn {
             MiniNcnError::InvalidOperator
         );
 
-        // TODO: ncn operator ticket stuff
-
         // verify merkle tree proof
-        // TODO: hash node
         let leaf = ctx.accounts.operator.key().to_bytes();
 
         spl_account_compression::cpi::verify_leaf(
@@ -321,22 +321,33 @@ pub mod mini_ncn {
 
         {
             let operator = Operator::from_bytes(&ctx.accounts.operator.try_borrow_data()?)?;
-            require!(
-                operator.admin == ctx.accounts.operator_admin.key(),
+            require_eq!(
+                operator.admin, ctx.accounts.operator_admin.key(),
                 MiniNcnError::InvalidOperator
             );
         }
 
         {
+            require_eq!(
+                voter_state.operator_vault_ticket, ctx.accounts.operator_vault_ticket.key(),
+                MiniNcnError::InvalidOperatorVaultTicket
+            );
             let operator_vault_ticket = OperatorVaultTicket::from_bytes(
                 &ctx.accounts.operator_vault_ticket.try_borrow_data()?,
             )?;
-            require!(
-                operator_vault_ticket.operator == ctx.accounts.operator.key(),
+            require_eq!(
+                operator_vault_ticket.operator, ctx.accounts.operator.key(),
                 MiniNcnError::InvalidOperatorVaultTicket
             );
-            require!(
-                operator_vault_ticket.vault == ctx.accounts.vault.key(),
+            let operator_vault_ticket = OperatorVaultTicket::from_bytes(
+                &ctx.accounts.operator_vault_ticket.try_borrow_data()?,
+            )?;
+            require_eq!(
+                operator_vault_ticket.operator, ctx.accounts.operator.key(),
+                MiniNcnError::InvalidOperatorVaultTicket
+            );
+            require_eq!(
+                operator_vault_ticket.vault, ctx.accounts.vault.key(),
                 MiniNcnError::InvalidOperatorVaultTicket
             );
         }
@@ -344,12 +355,12 @@ pub mod mini_ncn {
         let vault_operator_delegation = VaultOperatorDelegation::from_bytes(
             &ctx.accounts.vault_operator_delegation.try_borrow_data()?,
         )?;
-        require!(
-            vault_operator_delegation.operator == ctx.accounts.operator.key(),
+        require_eq!(
+            vault_operator_delegation.operator, ctx.accounts.operator.key(),
             MiniNcnError::InvalidOperator
         );
-        require!(
-            vault_operator_delegation.vault == ctx.accounts.vault.key(),
+        require_eq!(
+            vault_operator_delegation.vault, ctx.accounts.vault.key(),
             MiniNcnError::InvalidVault
         );
 
@@ -384,7 +395,6 @@ pub mod mini_ncn {
             msg!("Consensus reached");
 
             ballot_box.rewards_root = proposed_rewards_root;
-            // TODO: transfer rewards
         }
 
         let vote_window_passed = clock.epoch > ballot_box.epoch;
@@ -395,11 +405,31 @@ pub mod mini_ncn {
         Ok(())
     }
 
+
+    pub fn fund_rewards(ctx: Context<FundRewards>, amount: u64) -> Result<()> {
+        anchor_spl::token_interface::transfer_checked(
+            CpiContext::new(
+                ctx.accounts.rewards_token_program.to_account_info(),
+                anchor_spl::token_interface::TransferChecked {
+                    mint: ctx.accounts.rewards_mint.to_account_info(),
+                    from: ctx.accounts.fund_token_account.to_account_info(),
+                    to: ctx.accounts.rewards_token_account.to_account_info(),
+                    authority: ctx.accounts.funder.to_account_info(),
+                },
+            ),
+            amount,
+            ctx.accounts.rewards_mint.decimals,
+        )?;
+
+        Ok(())
+    }
+
+
     pub fn claim_rewards(ctx: Context<ClaimRewards>, args: ClaimRewardsArgs) -> Result<()> {
         {
             let operator = Operator::from_bytes(&ctx.accounts.operator.try_borrow_data()?)?;
-            require!(
-                operator.admin == ctx.accounts.operator_admin.key(),
+            require_eq!(
+                operator.admin, ctx.accounts.operator_admin.key(),
                 MiniNcnError::InvalidOperator
             );
         }
@@ -417,8 +447,26 @@ pub mod mini_ncn {
 
         let voter_state = &mut ctx.accounts.voter_state;
 
-        let _unclaimed_rewards = args.total_rewards - voter_state.claimed_rewards;
-        // TODO: transfer unclaimed rewards tokens
+        // transfer unclaimed rewards tokens
+        let unclaimed_rewards = args.total_rewards - voter_state.claimed_rewards;
+        anchor_spl::token_interface::transfer_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.rewards_token_program.to_account_info(),
+                anchor_spl::token_interface::TransferChecked {
+                    mint: ctx.accounts.rewards_mint.to_account_info(),
+                    from: ctx.accounts.rewards_token_account.to_account_info(),
+                    to: ctx.accounts.beneficiary_token_account.to_account_info(),
+                    authority: ctx.accounts.ncn_admin.to_account_info(),
+                },
+                &[&[
+                    b"ncn_admin",
+                    ctx.accounts.config.ncn.as_ref(),
+                    &[ctx.bumps.ncn_admin],
+                ]],
+            ),
+            unclaimed_rewards,
+            ctx.accounts.rewards_mint.decimals,
+        )?;
 
         voter_state.claimed_rewards = args.total_rewards;
 
@@ -439,6 +487,16 @@ pub struct InitializeNcn<'info> {
         seeds = [b"mini_ncn", ncn.key().as_ref()], bump
     )]
     pub config: Account<'info, Config>,
+    #[account(mint::token_program = rewards_token_program)]
+    pub rewards_mint: InterfaceAccount<'info, anchor_spl::token_interface::Mint>,
+    #[account(
+        init,
+        payer = payer,
+        associated_token::mint = rewards_mint,
+        associated_token::authority = ncn_admin,
+        associated_token::token_program = rewards_token_program,
+    )]
+    pub rewards_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
     #[account(mut, seeds = [b"ncn_admin", ncn.key().as_ref()], bump)]
     pub ncn_admin: SystemAccount<'info>,
     pub authority: Signer<'info>,
@@ -448,6 +506,8 @@ pub struct InitializeNcn<'info> {
     /// CHECK:
     #[account(address = JITO_RESTAKING_ID)]
     pub jito_restaking_program: UncheckedAccount<'info>,
+    pub rewards_token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
 }
 
 #[derive(Accounts)]
@@ -529,8 +589,6 @@ pub struct InitializeOperator<'info> {
     /// CHECK:
     #[account(mut, seeds = [b"config"], bump, seeds::program = JITO_VAULT_ID)]
     pub jito_vault_config: UncheckedAccount<'info>,
-    #[account(mut, seeds = [b"ncn_admin", jito_vault_config.key().as_ref()], bump)]
-    pub ncn_admin: SystemAccount<'info>,
     #[account()]
     pub config: Account<'info, Config>,
     #[account(seeds = [b"ballot_box", config.key().as_ref()], bump)]
@@ -651,6 +709,7 @@ pub struct Vote<'info> {
     pub noop_program: UncheckedAccount<'info>,
 }
 
+
 #[derive(Accounts)]
 pub struct CheckConsensus<'info> {
     #[account(address = ballot_box.config @ MiniNcnError::ConfigMismatch)]
@@ -664,6 +723,34 @@ pub struct CheckConsensus<'info> {
     pub authority: Signer<'info>,
 }
 
+
+#[derive(Accounts)]
+pub struct FundRewards<'info> {
+    #[account()]
+    pub config: Account<'info, Config>,
+    #[account(seeds = [b"ncn_admin", config.ncn.as_ref()], bump)]
+    pub ncn_admin: SystemAccount<'info>,
+    #[account(mint::token_program = rewards_token_program)]
+    pub rewards_mint: InterfaceAccount<'info, anchor_spl::token_interface::Mint>,
+    #[account(
+        mut,
+        associated_token::mint = rewards_mint,
+        associated_token::authority = ncn_admin,
+        associated_token::token_program = rewards_token_program
+    )]
+    pub rewards_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
+    #[account(
+        mut,
+        token::mint = rewards_mint.key(),
+        token::authority = funder,
+        token::token_program = rewards_token_program,
+    )]
+    pub fund_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
+    pub funder: Signer<'info>,
+    pub rewards_token_program: Interface<'info, TokenInterface>,
+}
+
+
 #[derive(Accounts)]
 pub struct ClaimRewards<'info> {
     #[account(address = voter_state.config @ MiniNcnError::ConfigMismatch)]
@@ -675,11 +762,26 @@ pub struct ClaimRewards<'info> {
     /// CHECK:
     #[account(seeds = [b"vault", config.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
     pub vault: UncheckedAccount<'info>,
+    #[account(seeds = [b"ncn_admin", config.ncn.as_ref()], bump)]
+    pub ncn_admin: SystemAccount<'info>,
     pub operator_admin: Signer<'info>,
     /// CHECK:
     #[account(address = voter_state.operator @ MiniNcnError::InvalidOperator)]
     pub operator: UncheckedAccount<'info>,
+    #[account(mint::token_program = rewards_token_program)]
+    pub rewards_mint: InterfaceAccount<'info, anchor_spl::token_interface::Mint>,
+    #[account(
+        mut,
+        associated_token::mint = rewards_mint,
+        associated_token::authority = ncn_admin,
+        associated_token::token_program = rewards_token_program
+    )]
+    pub rewards_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
+    #[account(mut, token::mint = rewards_mint.key(), token::token_program = rewards_token_program)]
+    pub beneficiary_token_account: InterfaceAccount<'info, anchor_spl::token_interface::TokenAccount>,
+    pub rewards_token_program: Interface<'info, TokenInterface>
 }
+
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct ClaimRewardsArgs {
@@ -695,7 +797,7 @@ pub struct Config {
     pub authority: Pubkey,
 }
 
-// TODO: use real data structure
+
 #[account]
 #[derive(InitSpace)]
 pub struct BallotBox {
@@ -717,14 +819,14 @@ impl BallotBox {
     }
 }
 
+
 #[account]
 #[derive(InitSpace)]
 pub struct VoterState {
     pub config: Pubkey,
     pub operator: Pubkey,
-    // TODO: use those to validate
-    // pub operator_vault_ticket: Pubkey,
-    // pub vault_operator_delegation: Pubkey,
+    pub operator_vault_ticket: Pubkey,
+    pub vault_operator_delegation: Pubkey,
     pub last_voted_epoch: u64,
     pub claimed_rewards: u64,
 }
