@@ -11,8 +11,6 @@ declare_program!(spl_account_compression);
 
 const NOOP_PROGRAM: Pubkey = pubkey!("noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV");
 
-const MAX_OPERATORS: u64 = 3;
-
 // from spl-merkle-tree-reference
 type Node = [u8; 32];
 
@@ -284,12 +282,6 @@ pub mod mini_ncn {
         require!(
             clock.epoch > voter_state.last_voted_epoch,
             MiniNcnError::InvalidEpoch
-        );
-
-        let operator_index = ballot_box.operators_voted;
-        require!(
-            operator_index < MAX_OPERATORS,
-            MiniNcnError::InvalidOperator
         );
 
         // verify merkle tree proof
