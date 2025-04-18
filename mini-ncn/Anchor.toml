@@ -36,7 +36,3 @@ program = "../fixtures/jito_vault_program.so"
 [[test.genesis]]
 address = "noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV"
 program = "../fixtures/noop.so"
-
-[[test.genesis]]
-address = "cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK"
-program = "../fixtures/spl_account_compression.so"

@@ -1,5 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
-import { MerkleTree, hash } from "./account-compression";
+import { MerkleTree, hash } from "./merkle-tree";
 
 export type RewardsNode = {
   user: PublicKey;

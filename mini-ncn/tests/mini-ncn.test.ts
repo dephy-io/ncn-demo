@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { BN, Program, web3 } from "@coral-xyz/anchor";
 import * as spl from "@solana/spl-token"
-import { ConcurrentMerkleTreeAccount, createAllocTreeIx, MerkleTree } from "./account-compression";
+import { MerkleTree } from "./merkle-tree";
 import { MiniNcn } from "../target/types/mini_ncn";
 import { assert } from "chai";
 import { $ } from "bun";
@@ -73,7 +73,6 @@ describe("mini-ncn", () => {
 
   let configPubkey: web3.PublicKey;
   let ballotBoxPubkey: web3.PublicKey;
-  const merkleTree = web3.Keypair.generate();
 
   before(async () => {
     // prepare NCN
@@ -146,42 +145,19 @@ describe("mini-ncn", () => {
   })
 
 
-  const maxDepth = 15;
-  const maxBufferSize = 64;
-  const canopyDepth = 8;
-
   it("initialize ballot box", async () => {
-    const allocTreeIx = await createAllocTreeIx(
-      provider.connection,
-      merkleTree.publicKey,
-      provider.wallet.payer.publicKey,
-      {
-        maxDepth,
-        maxBufferSize,
-      },
-      canopyDepth,
-    )
-
-    const tx = await miniNcn.methods
-      .initializeBallotBox({
-        maxDepth,
-        maxBufferSize,
-      })
-      .accounts({
-        ncn: ncnPubkey,
+    const tx = miniNcn.methods
+      .initializeBallotBox()
+      .accountsPartial({
+        config: configPubkey,
         authority: authority.publicKey,
-        merkleTree: merkleTree.publicKey,
       })
-      .preInstructions([allocTreeIx])
-      .signers([authority, merkleTree])
+      .signers([authority])
 
     const pubkeys = await tx.pubkeys();
     debugPubkeys(pubkeys);
 
     const signature = await tx.rpc();
-
-    const tree = await provider.connection.getAccountInfo(merkleTree.publicKey);
-    console.log('tree size', tree.data?.byteLength, tree.lamports / 1e9);
 
     ballotBoxPubkey = pubkeys.ballotBox;
 
@@ -284,7 +260,6 @@ describe("mini-ncn", () => {
 
   let op0Pubkey: web3.PublicKey;
   let op1Pubkey: web3.PublicKey;
-  let treeData: MerkleTree;
   it("initialize operators", async () => {
     // operators can initialize their own accounts
     const op0Output = await $`${jitoCliOp0} restaking operator initialize 1000`
@@ -293,18 +268,11 @@ describe("mini-ncn", () => {
     const op1Output = await $`${jitoCliOp1} restaking operator initialize 2000`
     op1Pubkey = getInitializedAddress(op1Output.stderr.toString());
 
-    // build the tree offline
-    treeData = MerkleTree.sparseMerkleTreeFromLeaves([
-      op0Pubkey.toBuffer(),
-      op1Pubkey.toBuffer(),
-    ], maxDepth);
-
     const tx = miniNcn.methods
       .initializeOperator()
       .accounts({
         config: configPubkey,
         operatorAdmin: op0AdminKeypair.publicKey,
-        merkleTree: merkleTree.publicKey,
         operator: op0Pubkey,
       })
       .signers([op0AdminKeypair]);
@@ -317,7 +285,6 @@ describe("mini-ncn", () => {
       .accounts({
         config: configPubkey,
         operatorAdmin: op1AdminKeypair.publicKey,
-        merkleTree: merkleTree.publicKey,
         operator: op1Pubkey,
       })
       .signers([op1AdminKeypair])
@@ -406,34 +373,15 @@ describe("mini-ncn", () => {
 
 
   it("op0 vote", async () => {
-    const merkleTreeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(provider.connection, merkleTree.publicKey);
-    const root = merkleTreeAccount.getCurrentRoot();
-
-    // a full proof contains `maxDepth` nodes
-    // const fullProof = treeData.getProof(0);
-    // minimum proof height is `maxDepth - canopyDepth`
-    const proof = treeData.getProof(0, true, maxDepth - canopyDepth);
-    assert.ok(root.equals(proof.root));
-
-    const proofAsAccounts = proof.proof.map(node => ({
-      pubkey: new web3.PublicKey(node),
-      isSigner: false,
-      isWritable: false,
-    }));
-
     const tx = miniNcn.methods
       .vote({
-        root: Array.from(proof.root),
-        index: proof.leafIndex,
         approved: true
       })
       .accounts({
         config: configPubkey,
-        merkleTree: merkleTree.publicKey,
         operatorAdmin: op0AdminKeypair.publicKey,
         operator: op0Pubkey,
       })
-      .remainingAccounts(proofAsAccounts)
       .signers([op0AdminKeypair])
 
     debugPubkeys(await tx.pubkeys());
@@ -465,27 +413,15 @@ describe("mini-ncn", () => {
 
 
   it("op1 vote", async () => {
-    const proof = treeData.getProof(1, true, maxDepth - canopyDepth);
-
-    const proofAsAccounts = proof.proof.map(node => ({
-      pubkey: new web3.PublicKey(node),
-      isSigner: false,
-      isWritable: false,
-    }));
-
     const tx = miniNcn.methods
       .vote({
-        root: Array.from(proof.root),
-        index: proof.leafIndex,
         approved: true
       })
       .accounts({
         config: configPubkey,
-        merkleTree: merkleTree.publicKey,
         operatorAdmin: op1AdminKeypair.publicKey,
         operator: op1Pubkey,
       })
-      .remainingAccounts(proofAsAccounts)
       .signers([op1AdminKeypair])
 
     debugPubkeys(await tx.pubkeys());

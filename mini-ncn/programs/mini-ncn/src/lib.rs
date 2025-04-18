@@ -7,10 +7,6 @@ use jito_vault_client::programs::JITO_VAULT_ID;
 
 declare_id!("FMtP7JSgYneYu36nisXubFWTWw6LGC9EFJ6YhjAq6CQr");
 
-declare_program!(spl_account_compression);
-
-const NOOP_PROGRAM: Pubkey = pubkey!("noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV");
-
 // from spl-merkle-tree-reference
 type Node = [u8; 32];
 
@@ -71,33 +67,11 @@ pub mod mini_ncn {
         Ok(())
     }
 
-    pub fn initialize_ballot_box(
-        ctx: Context<InitializeBallotBox>,
-        args: InitializeBallotBoxArgs,
-    ) -> Result<()> {
+    pub fn initialize_ballot_box(ctx: Context<InitializeBallotBox>) -> Result<()> {
         let config = &ctx.accounts.config;
-
-        spl_account_compression::cpi::init_empty_merkle_tree(
-            CpiContext::new_with_signer(
-                ctx.accounts.compression_program.to_account_info(),
-                spl_account_compression::cpi::accounts::InitEmptyMerkleTree {
-                    authority: ctx.accounts.ballot_box.to_account_info(),
-                    merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
-                    noop: ctx.accounts.noop_program.to_account_info(),
-                },
-                &[&[
-                    b"ballot_box",
-                    config.key().as_ref(),
-                    &[ctx.bumps.ballot_box],
-                ]],
-            ),
-            args.max_depth,
-            args.max_buffer_size,
-        )?;
 
         let ballot_box = &mut ctx.accounts.ballot_box;
         ballot_box.config = config.key();
-        ballot_box.merkle_tree = ctx.accounts.merkle_tree.key();
 
         Ok(())
     }
@@ -210,28 +184,6 @@ pub mod mini_ncn {
         voter_state.operator_vault_ticket = ctx.accounts.operator_vault_ticket.key();
         voter_state.vault_operator_delegation = ctx.accounts.vault_operator_delegation.key();
 
-        // SKIP: noop log for now
-        // wrap_application_data_v1(...)?;
-
-        let leaf = ctx.accounts.operator.key().to_bytes();
-
-        spl_account_compression::cpi::append(
-            CpiContext::new_with_signer(
-                ctx.accounts.compression_program.to_account_info(),
-                spl_account_compression::cpi::accounts::Append {
-                    authority: ctx.accounts.ballot_box.to_account_info(),
-                    merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
-                    noop: ctx.accounts.noop_program.to_account_info(),
-                },
-                &[&[
-                    b"ballot_box",
-                    ctx.accounts.config.key().as_ref(),
-                    &[ctx.bumps.ballot_box],
-                ]],
-            ),
-            leaf,
-        )?;
-
         Ok(())
     }
 
@@ -272,8 +224,8 @@ pub mod mini_ncn {
         Ok(())
     }
 
-    // explicitly lifetime is required for remaining_accounts
-    pub fn vote<'info>(ctx: Context<'_, '_, '_, 'info, Vote<'info>>, args: VoteArgs) -> Result<()> {
+
+    pub fn vote(ctx: Context<Vote>, args: VoteArgs) -> Result<()> {
         let ballot_box = &mut ctx.accounts.ballot_box;
         let voter_state = &mut ctx.accounts.voter_state;
 
@@ -283,27 +235,6 @@ pub mod mini_ncn {
             clock.epoch > voter_state.last_voted_epoch,
             MiniNcnError::InvalidEpoch
         );
-
-        // verify merkle tree proof
-        let leaf = ctx.accounts.operator.key().to_bytes();
-
-        spl_account_compression::cpi::verify_leaf(
-            CpiContext::new_with_signer(
-                ctx.accounts.compression_program.to_account_info(),
-                spl_account_compression::cpi::accounts::VerifyLeaf {
-                    merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
-                },
-                &[&[
-                    b"ballot_box",
-                    ctx.accounts.config.key().as_ref(),
-                    &[ctx.bumps.ballot_box],
-                ]],
-            )
-            .with_remaining_accounts(ctx.remaining_accounts.to_vec()),
-            args.root,
-            leaf,
-            args.index,
-        )?;
 
         // Vault-Operator
         {
@@ -358,11 +289,8 @@ pub mod mini_ncn {
         ballot_box.operators_voted += 1;
         if args.approved {
             ballot_box.approved_votes += vault_operator_delegation.delegation_state.staked_amount;
-            msg!(
-                "{} Approved at epoch {}",
-                ctx.accounts.operator_admin.key(),
-                clock.epoch
-            );
+        } else {
+            ballot_box.total_votes += vault_operator_delegation.delegation_state.staked_amount;
         }
 
         voter_state.last_voted_epoch = clock.epoch;
@@ -498,28 +426,18 @@ pub struct InitializeNcn<'info> {
 
 #[derive(Accounts)]
 pub struct InitializeBallotBox<'info> {
-    #[account(seeds = [b"mini_ncn", ncn.key().as_ref()], bump)]
+    #[account(seeds = [b"mini_ncn", config.ncn.key().as_ref()], bump)]
     pub config: Account<'info, Config>,
     #[account(init, payer = payer,
         space = BallotBox::DISCRIMINATOR.len() + BallotBox::INIT_SPACE,
         seeds = [b"ballot_box", config.key().as_ref()], bump
     )]
     pub ballot_box: Account<'info, BallotBox>,
-    /// CHECK:
-    #[account(mut)]
-    pub merkle_tree: UncheckedAccount<'info>,
-    /// CHECK:
-    pub ncn: UncheckedAccount<'info>,
     #[account(address = config.authority @ MiniNcnError::InvalidAuthority)]
     pub authority: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
-    pub compression_program:
-        Program<'info, spl_account_compression::program::SplAccountCompression>,
-    /// CHECK:
-    #[account(address = NOOP_PROGRAM)]
-    pub noop_program: UncheckedAccount<'info>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
@@ -586,9 +504,6 @@ pub struct InitializeOperator<'info> {
     )]
     pub voter_state: Account<'info, VoterState>,
     /// CHECK:
-    #[account(mut, address = ballot_box.merkle_tree)]
-    pub merkle_tree: UncheckedAccount<'info>,
-    /// CHECK:
     #[account(mut)]
     pub operator: UncheckedAccount<'info>,
     pub operator_admin: Signer<'info>,
@@ -605,11 +520,6 @@ pub struct InitializeOperator<'info> {
     pub vault_operator_delegation: UncheckedAccount<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
-    pub compression_program:
-        Program<'info, spl_account_compression::program::SplAccountCompression>,
-    /// CHECK:
-    #[account(address = NOOP_PROGRAM)]
-    pub noop_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     /// CHECK:
     #[account(address = JITO_RESTAKING_ID)]
@@ -660,8 +570,6 @@ pub struct Propose<'info> {
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct VoteArgs {
-    pub root: [u8; 32],
-    pub index: u32,
     pub approved: bool,
 }
 
@@ -672,9 +580,6 @@ pub struct Vote<'info> {
     pub ballot_box: Account<'info, BallotBox>,
     #[account(mut, seeds = [b"voter_state", config.key().as_ref(), operator.key().as_ref()], bump)]
     pub voter_state: Account<'info, VoterState>,
-    /// CHECK:
-    #[account(mut, address = ballot_box.merkle_tree)]
-    pub merkle_tree: UncheckedAccount<'info>,
     pub operator_admin: Signer<'info>,
     /// CHECK:
     #[account(seeds = [b"vault", config.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
@@ -688,11 +593,6 @@ pub struct Vote<'info> {
     /// CHECK:
     #[account(seeds = [b"vault_operator_delegation", vault.key().as_ref(), operator.key().as_ref()], bump, seeds::program = JITO_VAULT_ID)]
     pub vault_operator_delegation: UncheckedAccount<'info>,
-    pub compression_program:
-        Program<'info, spl_account_compression::program::SplAccountCompression>,
-    /// CHECK:
-    #[account(address = NOOP_PROGRAM)]
-    pub noop_program: UncheckedAccount<'info>,
 }
 
 
@@ -793,7 +693,7 @@ pub struct BallotBox {
     pub epoch: u64,
     pub operators_voted: u64,
     pub approved_votes: u64,
-    pub merkle_tree: Pubkey,
+    pub total_votes: u64,
     pub rewards_root: [u8; 32],
     pub proposed_rewards_root: Option<[u8; 32]>,
 }
@@ -803,6 +703,7 @@ impl BallotBox {
         self.epoch = epoch;
         self.operators_voted = 0;
         self.approved_votes = 0;
+        self.total_votes = 0;
         self.proposed_rewards_root = Some(proposed_rewards_root);
     }
 }
