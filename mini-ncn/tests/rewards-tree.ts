@@ -6,12 +6,12 @@ export type RewardsNode = {
   amount: bigint;
 }
 
+export function hashNode(node: RewardsNode): Buffer {
+  const amountBuffer = Buffer.alloc(8);
+  amountBuffer.writeBigUInt64LE(node.amount, 0);
+  return hash(node.user.toBuffer(), amountBuffer);
+}
+
 export function buildRewardsTree(nodes: RewardsNode[]) {
-  const tree = new MerkleTree(nodes.map(({user, amount}) => {
-    const amountBuffer = Buffer.alloc(8);
-    amountBuffer.writeBigUInt64LE(amount, 0);
-    return hash(user.toBuffer(), amountBuffer);
-  }));
-  
-  return tree;
+  return new MerkleTree(nodes.map(hashNode))
 }

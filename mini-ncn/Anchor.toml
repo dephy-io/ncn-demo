@@ -32,7 +32,3 @@ program = "../fixtures/jito_restaking_program.so"
 [[test.genesis]]
 address = "Vau1t6sLNxnzB7ZDsef8TLbPLfyZMYXH8WTNqUdm9g8"
 program = "../fixtures/jito_vault_program.so"
-
-[[test.genesis]]
-address = "noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV"
-program = "../fixtures/noop.so"

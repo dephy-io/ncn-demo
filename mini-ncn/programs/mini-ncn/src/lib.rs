@@ -10,7 +10,7 @@ declare_id!("FMtP7JSgYneYu36nisXubFWTWw6LGC9EFJ6YhjAq6CQr");
 // from spl-merkle-tree-reference
 type Node = [u8; 32];
 
-pub fn recompute(mut leaf: Node, proof: &[Node], index: u32) -> Node {
+pub fn recompute_root(mut leaf: Node, proof: &[Node], index: u32) -> Node {
     for (i, s) in proof.iter().enumerate() {
         if index >> i & 1 == 0 {
             let res = solana_program::keccak::hashv(&[&leaf, s.as_ref()]);
@@ -22,6 +22,7 @@ pub fn recompute(mut leaf: Node, proof: &[Node], index: u32) -> Node {
     }
     leaf
 }
+
 
 #[program]
 pub mod mini_ncn {
@@ -349,7 +350,7 @@ pub mod mini_ncn {
             ctx.accounts.owner.key().as_ref(),
             &args.total_rewards.to_le_bytes(),
         ]);
-        let computed_root = recompute(leaf.to_bytes(), &args.proof, args.index);
+        let computed_root = recompute_root(leaf.to_bytes(), &args.proof, args.index);
 
         require!(
             computed_root == ctx.accounts.ballot_box.rewards_root,
@@ -387,6 +388,7 @@ pub mod mini_ncn {
         Ok(())
     }
 }
+
 
 #[derive(Accounts)]
 pub struct InitializeNcn<'info> {
