@@ -63,3 +63,23 @@ solana-test-validator -r --bpf-program RestkWeAVL8fRGgzhfeoqFhsqKRchg6aa1XrcH96z
 
     bun run scripts/cli.ts initialize-operator -r http://127.0.0.1:8899 -k <operator-authority> --config <config-pubkey> --operator <operator-pubkey>
     ```
+
+5. **User Stake Tokens**
+    ```bash
+    jito-restaking-cli --rpc-url http://127.0.0.1:8899 --keypair <user-authority> vault vault mint-vrt <vault-pubkey> <amount>
+    ```
+
+6. **Delegate to Operator**
+    ```bash
+    bun run scripts/cli.ts delegate-operator -r http://127.0.0.1:8899 -k <ncn-authority> --config <config-pubkey> --operator <operator-pubkey> --amount <amount>
+    ```
+
+7. **Run Proposer**
+    ```bash
+    bun run scripts/mock_cli.ts run-proposer -r http://127.0.0.1:8899 -k <ncn-authority> --config <config-pubkey>
+    ```
+
+8. **Run Voters**
+    ```bash
+    bun run scripts/mock_cli.ts run-voter -r http://127.0.0.1:8899 -k <operator-authority> --config <config-pubkey> --operator <operator-pubkey>
+    ```

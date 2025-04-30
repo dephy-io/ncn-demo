@@ -65,7 +65,8 @@ cli.command('propose')
   .requiredOption('--config <pubkey>', 'Config public key')
   .requiredOption('--root <hex>', 'Merkle root (hex string)')
   .action(async (opts) => {
-    await propose(provider, opts);
+    const root = Array.from(Buffer.from(opts['root'], 'hex'));
+    await propose(provider, {...opts, root});
   });
 
 cli.command('vote')

@@ -184,14 +184,14 @@ export async function delegateOperator(provider: anchor.AnchorProvider, opts: De
 
 export interface ProposeOpts {
   config: string;
-  root: string;
+  root: number[];
 }
 export async function propose(provider: anchor.AnchorProvider, opts: ProposeOpts) {
   const miniNcn = getMiniNcnProgram();
   const config = new web3.PublicKey(opts['config']);
-  const root = Buffer.from(opts['root'], 'hex');
+  const root = opts['root'];
   const tx = miniNcn.methods
-    .propose(Array.from(root))
+    .propose(root)
     .accounts({
       config,
       authority: provider.wallet.publicKey,

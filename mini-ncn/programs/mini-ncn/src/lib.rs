@@ -220,7 +220,11 @@ pub mod mini_ncn {
         );
 
         // TODO: maybe set consensus threshold here
-        ballot_box.propose(clock.epoch, new_root);
+        ballot_box.epoch = clock.epoch;
+        ballot_box.operators_voted = 0;
+        ballot_box.approved_votes = 0;
+        ballot_box.total_votes = 0;
+        ballot_box.proposed_rewards_root = Some(new_root);
 
         Ok(())
     }
