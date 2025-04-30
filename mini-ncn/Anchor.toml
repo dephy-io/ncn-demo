@@ -5,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-mini_ncn = "FMtP7JSgYneYu36nisXubFWTWw6LGC9EFJ6YhjAq6CQr"
+mini_ncn = "9vd7Kc78HMoqzN5wnwhwg7fL6VtFHJFvaTJNSSmtpdQn"
 
 [registry]
 url = "https://api.apr.dev"

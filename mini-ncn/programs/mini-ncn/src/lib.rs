@@ -5,7 +5,7 @@ use anchor_spl::token_interface::TokenInterface;
 use jito_restaking_client::programs::JITO_RESTAKING_ID;
 use jito_vault_client::programs::JITO_VAULT_ID;
 
-declare_id!("FMtP7JSgYneYu36nisXubFWTWw6LGC9EFJ6YhjAq6CQr");
+declare_id!("9vd7Kc78HMoqzN5wnwhwg7fL6VtFHJFvaTJNSSmtpdQn");
 
 // from spl-merkle-tree-reference
 type Node = [u8; 32];
@@ -313,7 +313,7 @@ pub mod mini_ncn {
         let vault = Vault::from_bytes(&ctx.accounts.vault.try_borrow_data()?)?;
 
         let clock = Clock::get()?;
-        let consensus_reached = ballot_box.approved_votes > vault.vrt_supply * 2 / 3;
+        let consensus_reached = ballot_box.approved_votes >= vault.vrt_supply * 2 / 3;
 
         if consensus_reached {
             msg!("Consensus reached");
@@ -712,17 +712,6 @@ pub struct BallotBox {
     pub rewards_root: [u8; 32],
     pub proposed_rewards_root: Option<[u8; 32]>,
 }
-
-impl BallotBox {
-    pub fn propose(&mut self, epoch: u64, proposed_rewards_root: [u8; 32]) {
-        self.epoch = epoch;
-        self.operators_voted = 0;
-        self.approved_votes = 0;
-        self.total_votes = 0;
-        self.proposed_rewards_root = Some(proposed_rewards_root);
-    }
-}
-
 
 #[account]
 #[derive(InitSpace)]
