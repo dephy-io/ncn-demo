@@ -236,10 +236,17 @@ describe("mini-ncn", () => {
     )
 
     const tx = miniNcn.methods
-      .initializeVault(new BN(1_000))
+      .initializeVault({
+        initializeTokenAmount: new BN(1_000),
+        depositFeeBps: 0,
+        withdrawalFeeBps: 0,
+        rewardFeeBps: 0,
+      })
       .accountsPartial({
         config: configPubkey,
         stMint: stMint.publicKey,
+        vaultStTokenAccount,
+        adminStTokenAccount,
         authority: authority.publicKey,
         burnVaultVrtTokenAccount,
       })

@@ -79,7 +79,7 @@ pub mod mini_ncn {
 
     pub fn initialize_vault(
         ctx: Context<InitializeVault>,
-        initialize_token_amount: u64,
+        args: InitializeVaultArgs,
     ) -> Result<()> {
         let rent = Rent::get()?;
         anchor_lang::system_program::transfer(
@@ -113,11 +113,11 @@ pub mod mini_ncn {
                 associated_token_program: &ctx.accounts.associated_token_program.to_account_info(),
             },
             jito_vault_client::instructions::InitializeVaultInstructionArgs {
-                deposit_fee_bps: 0,
-                withdrawal_fee_bps: 0,
-                reward_fee_bps: 0,
+                deposit_fee_bps: args.deposit_fee_bps,
+                withdrawal_fee_bps: args.withdrawal_fee_bps,
+                reward_fee_bps: args.reward_fee_bps,
                 decimals: ctx.accounts.st_mint.decimals,
-                initialize_token_amount,
+                initialize_token_amount: args.initialize_token_amount,
             },
         )
         .invoke_signed(&[
@@ -486,6 +486,15 @@ pub struct InitializeVault<'info> {
     pub token_program: Program<'info, anchor_spl::token::Token>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
 }
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct InitializeVaultArgs {
+    pub initialize_token_amount: u64,
+    pub deposit_fee_bps: u16,
+    pub withdrawal_fee_bps: u16,
+    pub reward_fee_bps: u16,
+}
+
 
 #[derive(Accounts)]
 pub struct InitializeOperator<'info> {
